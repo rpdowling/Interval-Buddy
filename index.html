@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spotify Interval Runner</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <h1>Spotify Interval Runner</h1>
+        <p>Interval workouts with Spotify playlists, manual cue points, and browser-based playback.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="loginBtn" class="primary">Log in with Spotify</button>
+        <button id="logoutBtn" class="secondary hidden">Log out</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>Connection</h2>
+        <div class="stack gap-sm">
+          <div class="row between wrap">
+            <span class="muted">Status</span>
+            <span id="authStatus" class="pill">Signed out</span>
+          </div>
+          <div class="row between wrap">
+            <span class="muted">Player</span>
+            <span id="playerStatus" class="pill">Not ready</span>
+          </div>
+          <div class="row between wrap">
+            <span class="muted">Device</span>
+            <span id="deviceName" class="mono">—</span>
+          </div>
+          <button id="activateBtn" class="primary hidden">Arm audio on this browser</button>
+          <div id="statusMessage" class="status">Configure Spotify Client ID, then log in.</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Workout Template</h2>
+        <div id="intervalList" class="stack gap-sm"></div>
+        <div class="row gap-sm wrap top-gap">
+          <button id="addIntenseBtn" class="secondary">Add Intense</button>
+          <button id="addChillBtn" class="secondary">Add Chill</button>
+          <button id="saveTemplateBtn" class="secondary">Save locally</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Playlists</h2>
+        <div class="stack gap-sm">
+          <label>
+            <span>Intense playlist</span>
+            <select id="intensePlaylist"></select>
+          </label>
+          <label>
+            <span>Chill playlist</span>
+            <select id="chillPlaylist"></select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" id="noSlowToggle" />
+            <span>No Slow</span>
+          </label>
+          <div class="muted small">When No Slow is on, intense intervals use your saved cue points. Tracks without cue points can be skipped.</div>
+        </div>
+      </section>
+
+      <section class="card workout-card">
+        <h2>Workout Control</h2>
+        <div class="current-block">
+          <div class="label">Current interval</div>
+          <div id="currentMode" class="mode mode-idle">Idle</div>
+          <div id="countdown" class="countdown">00:00</div>
+          <div id="trackLabel" class="track-label">No track loaded</div>
+        </div>
+        <div class="row gap-sm wrap top-gap">
+          <button id="startBtn" class="primary">Start</button>
+          <button id="pauseBtn" class="secondary">Pause</button>
+          <button id="resumeBtn" class="secondary">Resume</button>
+          <button id="stopBtn" class="danger">Stop</button>
+        </div>
+      </section>
+
+      <section class="card full-span">
+        <h2>Intense Cue Editor</h2>
+        <div class="muted small">Save the exact section to use during No Slow intervals. Start and end are in seconds.</div>
+        <div id="cueEditor" class="cue-editor top-gap"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    window.APP_CONFIG = window.APP_CONFIG || {
+      CLIENT_ID: "8297115fe9624a92b5612e1da52175dd",
+      REDIRECT_URI: `${window.location.origin}${window.location.pathname}`,
+      SCOPES: [
+        "streaming",
+        "user-read-email",
+        "user-read-private",
+        "user-read-playback-state",
+        "user-modify-playback-state",
+        "playlist-read-private",
+        "playlist-read-collaborative"
+      ]
+    };
+  </script>
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

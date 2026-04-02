@@ -1,0 +1,4 @@
+services:
+  - type: static_site
+    name: spotify-interval-runner
+    staticPublishPath: .

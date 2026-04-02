@@ -1,3 +1,6 @@
+const CLIENT_ID = "https://interval-buddy.onrender.com";
+const REDIRECT_URI = window.location.origin + "/";
+
 const state = {
   accessToken: null,
   refreshToken: null,

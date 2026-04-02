@@ -23,7 +23,8 @@ const state = {
   intervalTicker: null,
   clipTimer: null,
   baseVolume: 0.92,
-  trackIndices: { intense: 0, chill: 0 }
+  trackIndices: { intense: 0, chill: 0 },
+  beepContext: null
 };
 
 const el = {
@@ -44,9 +45,11 @@ const el = {
   startBtn: document.getElementById("startBtn"),
   pauseBtn: document.getElementById("pauseBtn"),
   resumeBtn: document.getElementById("resumeBtn"),
+  nextBtn: document.getElementById("nextBtn"),
   stopBtn: document.getElementById("stopBtn"),
   currentMode: document.getElementById("currentMode"),
   countdown: document.getElementById("countdown"),
+  totalRemaining: document.getElementById("totalRemaining"),
   trackLabel: document.getElementById("trackLabel"),
   cueEditor: document.getElementById("cueEditor")
 };
@@ -57,6 +60,7 @@ function boot() {
   bindUI();
   renderTemplate();
   renderCountdown(0);
+  renderTotalRemaining(0);
   el.noSlowToggle.checked = state.noSlow;
   hydrateAuthFromUrl();
   hydrateStoredSession();
@@ -93,6 +97,7 @@ function bindUI() {
   el.startBtn.addEventListener("click", startWorkout);
   el.pauseBtn.addEventListener("click", pauseWorkout);
   el.resumeBtn.addEventListener("click", resumeWorkout);
+  el.nextBtn.addEventListener("click", skipToNextPeriod);
   el.stopBtn.addEventListener("click", stopWorkout);
 }
 
@@ -303,6 +308,7 @@ async function reconnectPlayer() {
 
 async function activateAudio() {
   try {
+    await ensureBeepAudio();
     await state.player.activateElement();
     state.activated = true;
     await transferPlayback(false);
@@ -336,11 +342,6 @@ function populatePlaylistSelects() {
   el.chillPlaylist.innerHTML = options;
   el.intensePlaylist.value = state.selectedIntensePlaylist;
   el.chillPlaylist.value = state.selectedChillPlaylist;
-  console.log("Selected playlists", {
-  intense: state.selectedIntensePlaylist,
-  chill: state.selectedChillPlaylist,
-  allPlaylists: state.playlists.map(p => ({ id: p.id, name: p.name }))
-});
 }
 
 async function loadBucketTracks() {
@@ -532,6 +533,8 @@ async function startWorkout() {
       throw new Error("Chill playlist has no usable tracks loaded.");
     }
 
+    await ensureBeepAudio();
+
     stopWorkout(false);
     state.trackIndices = { intense: 0, chill: 0 };
 
@@ -539,11 +542,12 @@ async function startWorkout() {
       index: 0,
       paused: false,
       intervalEndsAt: 0,
-      boundaryTimer: null
+      boundaryTimer: null,
+      remainingMs: 0
     };
 
     await transferPlayback(false);
-    await startCurrentInterval(true);
+    await startCurrentInterval();
     setStatus("Workout started.");
   } catch (err) {
     console.error(err);
@@ -559,9 +563,11 @@ async function startCurrentInterval() {
   const durationMs = Math.round(interval.minutes * 60_000);
 
   state.workout.intervalEndsAt = Date.now() + durationMs;
+  state.workout.remainingMs = durationMs;
 
   renderCurrentMode(interval.mode);
   renderCountdown(durationMs);
+  renderTotalRemaining(computeTotalRemainingMs());
   startIntervalTicker();
 
   state.workout.boundaryTimer = setTimeout(async () => {
@@ -647,7 +653,54 @@ async function advanceInterval() {
     return;
   }
 
+  await playPeriodBeep();
   await startCurrentInterval();
+}
+
+async function skipToNextPeriod() {
+  if (!state.workout) {
+    setStatus("No workout running.");
+    return;
+  }
+
+  const wasPaused = !!state.workout.paused;
+
+  clearInterval(state.intervalTicker);
+  clearTimeout(state.clipTimer);
+  clearTimeout(state.workout?.boundaryTimer);
+
+  try {
+    await fadeOut();
+  } catch (err) {
+    console.warn(err);
+  }
+
+  state.workout.index += 1;
+
+  if (state.workout.index >= state.template.length) {
+    stopWorkout(false);
+    setStatus("Workout complete.");
+    return;
+  }
+
+  await playPeriodBeep();
+
+  if (wasPaused) {
+    const interval = state.template[state.workout.index];
+    const durationMs = Math.round(interval.minutes * 60_000);
+    state.workout.paused = true;
+    state.workout.remainingMs = durationMs;
+    renderCurrentMode(interval.mode);
+    renderCountdown(durationMs);
+    renderTotalRemaining(computeTotalRemainingMs());
+    el.trackLabel.textContent = "No track loaded";
+    setStatus("Skipped to next period.");
+    return;
+  }
+
+  state.workout.paused = false;
+  await startCurrentInterval();
+  setStatus("Skipped to next period.");
 }
 
 async function pauseWorkout() {
@@ -658,6 +711,9 @@ async function pauseWorkout() {
   clearTimeout(state.workout.boundaryTimer);
   clearTimeout(state.clipTimer);
   state.workout.remainingMs = Math.max(0, state.workout.intervalEndsAt - Date.now());
+
+  renderCountdown(state.workout.remainingMs);
+  renderTotalRemaining(computeTotalRemainingMs());
 
   try {
     await state.player.pause();
@@ -677,6 +733,8 @@ async function resumeWorkout() {
     await advanceInterval();
   }, state.workout.remainingMs);
 
+  renderCountdown(state.workout.remainingMs);
+  renderTotalRemaining(computeTotalRemainingMs());
   startIntervalTicker();
 
   const mode = state.template[state.workout.index].mode;
@@ -695,6 +753,7 @@ function stopWorkout(showMessage = true) {
   state.workout = null;
   renderCurrentMode("idle");
   renderCountdown(0);
+  renderTotalRemaining(0);
   el.trackLabel.textContent = "No track loaded";
 
   if (state.player) {
@@ -711,8 +770,11 @@ function startIntervalTicker() {
 
   state.intervalTicker = setInterval(() => {
     if (!state.workout || state.workout.paused) return;
+
     const remaining = Math.max(0, state.workout.intervalEndsAt - Date.now());
+    state.workout.remainingMs = remaining;
     renderCountdown(remaining);
+    renderTotalRemaining(computeTotalRemainingMs());
   }, 200);
 }
 
@@ -855,10 +917,33 @@ function renderCurrentMode(mode) {
 }
 
 function renderCountdown(ms) {
+  el.countdown.textContent = formatClock(ms);
+}
+
+function renderTotalRemaining(ms) {
+  el.totalRemaining.textContent = `Total left: ${formatClock(ms)}`;
+}
+
+function formatClock(ms) {
   const totalSec = Math.max(0, Math.ceil(ms / 1000));
   const min = String(Math.floor(totalSec / 60)).padStart(2, "0");
   const sec = String(totalSec % 60).padStart(2, "0");
-  el.countdown.textContent = `${min}:${sec}`;
+  return `${min}:${sec}`;
+}
+
+function computeTotalRemainingMs() {
+  if (!state.workout) return 0;
+
+  const currentMs = state.workout.paused
+    ? Math.max(0, state.workout.remainingMs || 0)
+    : Math.max(0, state.workout.intervalEndsAt - Date.now());
+
+  let futureMs = 0;
+  for (let i = state.workout.index + 1; i < state.template.length; i++) {
+    futureMs += Math.round(state.template[i].minutes * 60_000);
+  }
+
+  return currentMs + futureMs;
 }
 
 function setStatus(message) {
@@ -872,6 +957,45 @@ function loadJSON(key, fallback) {
   } catch {
     return fallback;
   }
+}
+
+async function ensureBeepAudio() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return null;
+
+  if (!state.beepContext) {
+    state.beepContext = new AudioCtx();
+  }
+
+  if (state.beepContext.state === "suspended") {
+    await state.beepContext.resume();
+  }
+
+  return state.beepContext;
+}
+
+async function playPeriodBeep() {
+  const ctx = await ensureBeepAudio();
+  if (!ctx) return;
+
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const now = ctx.currentTime;
+
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(880, now);
+
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.04, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  osc.start(now);
+  osc.stop(now + 0.13);
+
+  await sleep(140);
 }
 
 function sleep(ms) {

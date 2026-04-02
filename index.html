@@ -36,7 +36,7 @@
             <span id="deviceName" class="mono">—</span>
           </div>
           <button id="activateBtn" class="primary hidden">Arm audio on this browser</button>
-          <div id="statusMessage" class="status">Configure Spotify Client ID, then log in.</div>
+          <div id="statusMessage" class="status">Log in with Spotify.</div>
         </div>
       </section>
 
@@ -74,13 +74,19 @@
         <div class="current-block">
           <div class="label">Current interval</div>
           <div id="currentMode" class="mode mode-idle">Idle</div>
-          <div id="countdown" class="countdown">00:00</div>
+
+          <div class="row gap-sm wrap" style="align-items: flex-end;">
+            <div id="countdown" class="countdown">00:00</div>
+            <div id="totalRemaining" class="small muted">Total left: 00:00</div>
+          </div>
+
           <div id="trackLabel" class="track-label">No track loaded</div>
         </div>
         <div class="row gap-sm wrap top-gap">
           <button id="startBtn" class="primary">Start</button>
           <button id="pauseBtn" class="secondary">Pause</button>
           <button id="resumeBtn" class="secondary">Resume</button>
+          <button id="nextBtn" class="secondary">Next Period</button>
           <button id="stopBtn" class="danger">Stop</button>
         </div>
       </section>

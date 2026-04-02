@@ -1,6 +1,17 @@
-const CLIENT_ID = "https://interval-buddy.onrender.com";
-const REDIRECT_URI = window.location.origin + "/";
 
+window.APP_CONFIG = {
+  CLIENT_ID = "8297115fe9624a92b5612e1da52175dd";
+  REDIRECT_URI: window.location.origin + "/",
+  SCOPES: [
+    "streaming",
+    "user-read-email",
+    "user-read-private",
+    "playlist-read-private",
+    "playlist-read-collaborative",
+    "user-modify-playback-state",
+    "user-read-playback-state"
+  ]
+};
 const state = {
   accessToken: null,
   refreshToken: null,

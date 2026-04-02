@@ -309,7 +309,7 @@ async function activateAudio() {
     setStatus("Audio armed on this browser.");
   } catch (err) {
     console.error(err);
-    setStatus("Could not arm browser audio.");
+    setStatus(err.message || "Could not arm browser audio.");
   }
 }
 
@@ -380,26 +380,26 @@ async function loadPlaylistTracks(playlistId, label = "playlist") {
   while (url) {
     const data = await spotifyFetch(url);
 
-    for (const item of data.items || []) {
+    for (const row of data.items || []) {
       total += 1;
 
-      const track = item.track;
-      if (!track) {
+      const playable = row.item;
+      if (!playable) {
         skipped += 1;
         continue;
       }
 
-      if (track.is_local) {
+      if (row.is_local || playable.is_local) {
         skipped += 1;
         continue;
       }
 
-      if (track.type !== "track") {
+      if (playable.type !== "track") {
         skipped += 1;
         continue;
       }
 
-      usable.push(track);
+      usable.push(playable);
     }
 
     url = data.next;
@@ -728,6 +728,12 @@ async function playTrack(trackUri, positionMs = 0) {
     },
     true
   );
+
+  try {
+    await state.player.resume();
+  } catch (err) {
+    console.warn("Local resume fallback failed:", err);
+  }
 }
 
 async function previewTrack(track, positionMs = 0) {

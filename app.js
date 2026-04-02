@@ -375,7 +375,7 @@ async function loadPlaylistTracks(playlistId, label = "playlist") {
   const usable = [];
   let total = 0;
   let skipped = 0;
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100`;
 
   while (url) {
     const data = await spotifyFetch(url);

@@ -1,17 +1,3 @@
-
-window.APP_CONFIG = {
-  CLIENT_ID : "8297115fe9624a92b5612e1da52175dd",
-  REDIRECT_URI: window.location.origin + "/",
-  SCOPES: [
-    "streaming",
-    "user-read-email",
-    "user-read-private",
-    "playlist-read-private",
-    "playlist-read-collaborative",
-    "user-modify-playback-state",
-    "user-read-playback-state"
-  ]
-};
 const state = {
   accessToken: null,
   refreshToken: null,
@@ -86,20 +72,24 @@ function bindUI() {
   el.addIntenseBtn.addEventListener("click", () => addInterval("intense"));
   el.addChillBtn.addEventListener("click", () => addInterval("chill"));
   el.saveTemplateBtn.addEventListener("click", saveTemplate);
+
   el.intensePlaylist.addEventListener("change", async (e) => {
     state.selectedIntensePlaylist = e.target.value;
     localStorage.setItem("sir_intense_playlist", state.selectedIntensePlaylist);
     await loadBucketTracks();
   });
+
   el.chillPlaylist.addEventListener("change", async (e) => {
     state.selectedChillPlaylist = e.target.value;
     localStorage.setItem("sir_chill_playlist", state.selectedChillPlaylist);
     await loadBucketTracks();
   });
+
   el.noSlowToggle.addEventListener("change", (e) => {
     state.noSlow = e.target.checked;
     localStorage.setItem("sir_no_slow", String(state.noSlow));
   });
+
   el.startBtn.addEventListener("click", startWorkout);
   el.pauseBtn.addEventListener("click", pauseWorkout);
   el.resumeBtn.addEventListener("click", resumeWorkout);
@@ -109,9 +99,11 @@ function bindUI() {
 function hydrateStoredSession() {
   const stored = loadJSON("sir_session", null);
   if (!stored) return;
+
   state.accessToken = stored.accessToken;
   state.refreshToken = stored.refreshToken;
   state.expiresAt = stored.expiresAt;
+
   if (Date.now() > state.expiresAt - 60_000 && state.refreshToken) {
     refreshAccessToken().catch(console.error);
   } else if (state.accessToken) {
@@ -123,12 +115,15 @@ function hydrateAuthFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
   const error = params.get("error");
+
   if (error) {
     setStatus(`Spotify login error: ${error}`);
     history.replaceState({}, document.title, window.location.pathname);
     return;
   }
+
   if (!code) return;
+
   exchangeCodeForToken(code)
     .then(() => {
       history.replaceState({}, document.title, window.location.pathname);
@@ -140,11 +135,12 @@ function hydrateAuthFromUrl() {
 }
 
 async function loginWithSpotify() {
-  const clientId = window.APP_CONFIG.CLIENT_ID;
-  if (!clientId || clientId.includes("PASTE_YOUR_SPOTIFY_CLIENT_ID_HERE")) {
-    setStatus("Set APP_CONFIG.CLIENT_ID in index.html first.");
+  const clientId = window.APP_CONFIG?.CLIENT_ID;
+  if (!clientId) {
+    setStatus("Missing APP_CONFIG.CLIENT_ID in index.html.");
     return;
   }
+
   const verifier = generateRandomString(64);
   const challenge = await sha256base64url(verifier);
   localStorage.setItem("sir_pkce_verifier", verifier);
@@ -178,7 +174,9 @@ async function exchangeCodeForToken(code) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body
   });
+
   if (!res.ok) throw new Error("Token exchange failed.");
+
   const data = await res.json();
   persistSession(data);
   await onAuthenticated();
@@ -196,7 +194,9 @@ async function refreshAccessToken() {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body
   });
+
   if (!res.ok) throw new Error("Refresh token failed.");
+
   const data = await res.json();
   persistSession({ ...data, refresh_token: data.refresh_token || state.refreshToken });
   return state.accessToken;
@@ -206,6 +206,7 @@ function persistSession(data) {
   state.accessToken = data.access_token;
   state.refreshToken = data.refresh_token || state.refreshToken;
   state.expiresAt = Date.now() + (data.expires_in || 3600) * 1000;
+
   localStorage.setItem("sir_session", JSON.stringify({
     accessToken: state.accessToken,
     refreshToken: state.refreshToken,
@@ -227,12 +228,14 @@ function logout() {
   stopWorkout();
   localStorage.removeItem("sir_session");
   localStorage.removeItem("sir_pkce_verifier");
+
   state.accessToken = null;
   state.refreshToken = null;
   state.expiresAt = 0;
   state.playlists = [];
   state.intenseTracks = [];
   state.chillTracks = [];
+
   populatePlaylistSelects();
   renderCueEditor();
   updateAuthUI();
@@ -249,6 +252,7 @@ function updateAuthUI() {
 
 function initPlayer() {
   if (state.player) return;
+
   state.player = new Spotify.Player({
     name: "Spotify Interval Runner",
     getOAuthToken: async (cb) => {
@@ -312,11 +316,13 @@ async function activateAudio() {
 async function loadPlaylists() {
   const all = [];
   let url = "https://api.spotify.com/v1/me/playlists?limit=50";
+
   while (url) {
     const data = await spotifyFetch(url);
     all.push(...data.items);
     url = data.next;
   }
+
   state.playlists = all.filter(Boolean);
   populatePlaylistSelects();
 }
@@ -333,26 +339,50 @@ function populatePlaylistSelects() {
 }
 
 async function loadBucketTracks() {
-  state.intenseTracks = state.selectedIntensePlaylist ? await loadPlaylistTracks(state.selectedIntensePlaylist) : [];
-  state.chillTracks = state.selectedChillPlaylist ? await loadPlaylistTracks(state.selectedChillPlaylist) : [];
-  renderCueEditor();
+  try {
+    state.intenseTracks = state.selectedIntensePlaylist
+      ? await loadPlaylistTracks(state.selectedIntensePlaylist)
+      : [];
+
+    state.chillTracks = state.selectedChillPlaylist
+      ? await loadPlaylistTracks(state.selectedChillPlaylist)
+      : [];
+
+    renderCueEditor();
+    setStatus(`Loaded ${state.intenseTracks.length} intense tracks and ${state.chillTracks.length} chill tracks.`);
+  } catch (err) {
+    console.error(err);
+    state.intenseTracks = [];
+    state.chillTracks = [];
+    renderCueEditor();
+    setStatus(err.message || "Could not load playlist tracks.");
+  }
 }
 
 async function loadPlaylistTracks(playlistId) {
   const tracks = [];
   let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
+
   while (url) {
     const data = await spotifyFetch(url);
+
     for (const item of data.items || []) {
-      if (item.track && item.track.type === "track") tracks.push(item.track);
+      const track = item.track;
+      if (!track) continue;
+      if (track.is_local) continue;
+      if (track.type !== "track") continue;
+      tracks.push(track);
     }
+
     url = data.next;
   }
+
   return tracks;
 }
 
 function renderTemplate() {
   el.intervalList.innerHTML = "";
+
   state.template.forEach((interval, index) => {
     const row = document.createElement("div");
     row.className = "interval-row";
@@ -398,12 +428,14 @@ function saveTemplate() {
 
 function renderCueEditor() {
   const tracks = state.intenseTracks;
+
   if (!tracks.length) {
     el.cueEditor.innerHTML = `<div class="status">Select an intense playlist to edit cue points.</div>`;
     return;
   }
 
   el.cueEditor.innerHTML = "";
+
   for (const track of tracks) {
     const cue = state.cues[track.id] || {};
     const row = document.createElement("div");
@@ -454,16 +486,27 @@ async function startWorkout() {
     if (!state.activated) throw new Error("Tap 'Arm audio on this browser' first on iPhone.");
     if (!state.template.length) throw new Error("Add at least one interval.");
     if (!state.selectedIntensePlaylist || !state.selectedChillPlaylist) throw new Error("Choose both playlists.");
-    if (!state.intenseTracks.length || !state.chillTracks.length) throw new Error("Selected playlists are empty.");
+
+    if (!state.intenseTracks.length && !state.chillTracks.length) {
+      throw new Error("Both selected playlists failed to load tracks.");
+    }
+    if (!state.intenseTracks.length) {
+      throw new Error("Intense playlist has no usable tracks loaded.");
+    }
+    if (!state.chillTracks.length) {
+      throw new Error("Chill playlist has no usable tracks loaded.");
+    }
 
     stopWorkout(false);
     state.trackIndices = { intense: 0, chill: 0 };
+
     state.workout = {
       index: 0,
       paused: false,
       intervalEndsAt: 0,
       boundaryTimer: null
     };
+
     await transferPlayback(false);
     await startCurrentInterval(true);
     setStatus("Workout started.");
@@ -473,12 +516,15 @@ async function startWorkout() {
   }
 }
 
-async function startCurrentInterval(isFirst = false) {
+async function startCurrentInterval() {
   clearTimeout(state.workout?.boundaryTimer);
   clearTimeout(state.clipTimer);
+
   const interval = state.template[state.workout.index];
   const durationMs = Math.round(interval.minutes * 60_000);
+
   state.workout.intervalEndsAt = Date.now() + durationMs;
+
   renderCurrentMode(interval.mode);
   renderCountdown(durationMs);
   startIntervalTicker();
@@ -519,10 +565,13 @@ async function playModeForDuration(mode, remainingMs, useCue) {
 
   const fadeLeadMs = Math.min(700, Math.floor(clipLengthMs / 3));
   const nextDelay = Math.max(200, clipLengthMs - fadeLeadMs);
+
   state.clipTimer = setTimeout(async () => {
     if (!state.workout || state.workout.paused) return;
+
     const intervalRemaining = Math.max(0, state.workout.intervalEndsAt - Date.now());
     if (intervalRemaining <= 200) return;
+
     await fadeOut();
     await playModeForDuration(mode, intervalRemaining, useCue);
   }, nextDelay);
@@ -531,40 +580,50 @@ async function playModeForDuration(mode, remainingMs, useCue) {
 function nextTrack(mode, requireCue) {
   const list = mode === "intense" ? state.intenseTracks : state.chillTracks;
   if (!list.length) return null;
+
   const originalIndex = state.trackIndices[mode] % list.length;
+
   for (let step = 0; step < list.length; step++) {
     const idx = (originalIndex + step) % list.length;
     const track = list[idx];
     const cue = state.cues[track.id] || {};
     const hasCue = cue.startSec != null;
+
     if (!requireCue || hasCue) {
       state.trackIndices[mode] = idx + 1;
       return track;
     }
   }
+
   return null;
 }
 
 async function advanceInterval() {
   if (!state.workout) return;
+
   clearTimeout(state.clipTimer);
   await fadeOut();
+
   state.workout.index += 1;
+
   if (state.workout.index >= state.template.length) {
     stopWorkout(false);
     setStatus("Workout complete.");
     return;
   }
+
   await startCurrentInterval();
 }
 
 async function pauseWorkout() {
   if (!state.workout || state.workout.paused) return;
+
   state.workout.paused = true;
   clearInterval(state.intervalTicker);
   clearTimeout(state.workout.boundaryTimer);
   clearTimeout(state.clipTimer);
   state.workout.remainingMs = Math.max(0, state.workout.intervalEndsAt - Date.now());
+
   try {
     await state.player.pause();
     setStatus("Workout paused.");
@@ -575,12 +634,16 @@ async function pauseWorkout() {
 
 async function resumeWorkout() {
   if (!state.workout || !state.workout.paused) return;
+
   state.workout.paused = false;
   state.workout.intervalEndsAt = Date.now() + state.workout.remainingMs;
+
   state.workout.boundaryTimer = setTimeout(async () => {
     await advanceInterval();
   }, state.workout.remainingMs);
+
   startIntervalTicker();
+
   const mode = state.template[state.workout.index].mode;
   await playModeForDuration(mode, state.workout.remainingMs, mode === "intense" && state.noSlow);
   setStatus("Workout resumed.");
@@ -589,17 +652,28 @@ async function resumeWorkout() {
 function stopWorkout(showMessage = true) {
   clearInterval(state.intervalTicker);
   clearTimeout(state.clipTimer);
-  if (state.workout?.boundaryTimer) clearTimeout(state.workout.boundaryTimer);
+
+  if (state.workout?.boundaryTimer) {
+    clearTimeout(state.workout.boundaryTimer);
+  }
+
   state.workout = null;
   renderCurrentMode("idle");
   renderCountdown(0);
   el.trackLabel.textContent = "No track loaded";
-  if (state.player) state.player.pause().catch(() => {});
-  if (showMessage) setStatus("Workout stopped.");
+
+  if (state.player) {
+    state.player.pause().catch(() => {});
+  }
+
+  if (showMessage) {
+    setStatus("Workout stopped.");
+  }
 }
 
 function startIntervalTicker() {
   clearInterval(state.intervalTicker);
+
   state.intervalTicker = setInterval(() => {
     if (!state.workout || state.workout.paused) return;
     const remaining = Math.max(0, state.workout.intervalEndsAt - Date.now());
@@ -608,10 +682,17 @@ function startIntervalTicker() {
 }
 
 async function playTrack(trackUri, positionMs = 0) {
-  await spotifyFetch(`https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(state.deviceId)}`, {
-    method: "PUT",
-    body: JSON.stringify({ uris: [trackUri], position_ms: Math.max(0, Math.round(positionMs)) })
-  }, true);
+  await spotifyFetch(
+    `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(state.deviceId)}`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        uris: [trackUri],
+        position_ms: Math.max(0, Math.round(positionMs))
+      })
+    },
+    true
+  );
 }
 
 async function previewTrack(track, positionMs = 0) {
@@ -620,8 +701,10 @@ async function previewTrack(track, positionMs = 0) {
       setStatus("Arm audio on this browser before previewing.");
       return;
     }
+
     await playTrack(track.uri, positionMs);
     await fadeIn();
+
     el.trackLabel.textContent = `Preview: ${track.name} — ${(track.artists || []).map((a) => a.name).join(", ")}`;
   } catch (err) {
     console.error(err);
@@ -630,10 +713,14 @@ async function previewTrack(track, positionMs = 0) {
 }
 
 async function transferPlayback(play = false) {
-  await spotifyFetch("https://api.spotify.com/v1/me/player", {
-    method: "PUT",
-    body: JSON.stringify({ device_ids: [state.deviceId], play })
-  }, true);
+  await spotifyFetch(
+    "https://api.spotify.com/v1/me/player",
+    {
+      method: "PUT",
+      body: JSON.stringify({ device_ids: [state.deviceId], play })
+    },
+    true
+  );
 }
 
 async function fadeOutThen(fn) {
@@ -643,8 +730,10 @@ async function fadeOutThen(fn) {
 
 async function fadeOut() {
   if (!state.player) return;
+
   const from = await safeVolume();
   const steps = 5;
+
   for (let i = steps - 1; i >= 0; i--) {
     const value = Math.max(0.08, from * (i / steps));
     await state.player.setVolume(value);
@@ -654,7 +743,9 @@ async function fadeOut() {
 
 async function fadeIn() {
   if (!state.player) return;
+
   const steps = 5;
+
   for (let i = 1; i <= steps; i++) {
     const value = Math.max(0.08, state.baseVolume * (i / steps));
     await state.player.setVolume(value);
@@ -672,6 +763,7 @@ async function safeVolume() {
 
 async function spotifyFetch(url, options = {}, allowNoContent = false) {
   const token = await getAccessToken();
+
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -682,27 +774,33 @@ async function spotifyFetch(url, options = {}, allowNoContent = false) {
   });
 
   if (res.status === 204 && allowNoContent) return null;
+
   if (res.status === 401 && state.refreshToken) {
     await refreshAccessToken();
     return spotifyFetch(url, options, allowNoContent);
   }
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Spotify API error ${res.status}: ${text}`);
   }
+
   return res.json();
 }
 
 async function getAccessToken() {
   if (!state.accessToken) throw new Error("Not logged in.");
+
   if (Date.now() > state.expiresAt - 60_000) {
     await refreshAccessToken();
   }
+
   return state.accessToken;
 }
 
 function renderCurrentMode(mode) {
   el.currentMode.className = "mode";
+
   if (mode === "intense") {
     el.currentMode.classList.add("mode-intense");
     el.currentMode.textContent = "Intense";
@@ -761,6 +859,7 @@ function generateRandomString(length) {
 async function sha256base64url(input) {
   const data = new TextEncoder().encode(input);
   const hash = await crypto.subtle.digest("SHA-256", data);
+
   return btoa(String.fromCharCode(...new Uint8Array(hash)))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")

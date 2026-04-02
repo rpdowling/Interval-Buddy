@@ -1,6 +1,6 @@
 
 window.APP_CONFIG = {
-  CLIENT_ID = "8297115fe9624a92b5612e1da52175dd";
+  CLIENT_ID : "8297115fe9624a92b5612e1da52175dd";
   REDIRECT_URI: window.location.origin + "/",
   SCOPES: [
     "streaming",

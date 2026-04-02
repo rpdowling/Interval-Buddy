@@ -336,20 +336,32 @@ function populatePlaylistSelects() {
   el.chillPlaylist.innerHTML = options;
   el.intensePlaylist.value = state.selectedIntensePlaylist;
   el.chillPlaylist.value = state.selectedChillPlaylist;
+  console.log("Selected playlists", {
+  intense: state.selectedIntensePlaylist,
+  chill: state.selectedChillPlaylist,
+  allPlaylists: state.playlists.map(p => ({ id: p.id, name: p.name }))
+});
 }
 
 async function loadBucketTracks() {
   try {
-    state.intenseTracks = state.selectedIntensePlaylist
-      ? await loadPlaylistTracks(state.selectedIntensePlaylist)
-      : [];
+    const intense = state.selectedIntensePlaylist
+      ? await loadPlaylistTracks(state.selectedIntensePlaylist, "intense")
+      : { usable: [], total: 0, skipped: 0 };
 
-    state.chillTracks = state.selectedChillPlaylist
-      ? await loadPlaylistTracks(state.selectedChillPlaylist)
-      : [];
+    const chill = state.selectedChillPlaylist
+      ? await loadPlaylistTracks(state.selectedChillPlaylist, "chill")
+      : { usable: [], total: 0, skipped: 0 };
+
+    state.intenseTracks = intense.usable;
+    state.chillTracks = chill.usable;
 
     renderCueEditor();
-    setStatus(`Loaded ${state.intenseTracks.length} intense tracks and ${state.chillTracks.length} chill tracks.`);
+
+    setStatus(
+      `Intense: ${intense.usable.length}/${intense.total} usable. ` +
+      `Chill: ${chill.usable.length}/${chill.total} usable.`
+    );
   } catch (err) {
     console.error(err);
     state.intenseTracks = [];
@@ -359,25 +371,48 @@ async function loadBucketTracks() {
   }
 }
 
-async function loadPlaylistTracks(playlistId) {
-  const tracks = [];
+async function loadPlaylistTracks(playlistId, label = "playlist") {
+  const usable = [];
+  let total = 0;
+  let skipped = 0;
   let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
 
   while (url) {
     const data = await spotifyFetch(url);
 
     for (const item of data.items || []) {
+      total += 1;
+
       const track = item.track;
-      if (!track) continue;
-      if (track.is_local) continue;
-      if (track.type !== "track") continue;
-      tracks.push(track);
+      if (!track) {
+        skipped += 1;
+        continue;
+      }
+
+      if (track.is_local) {
+        skipped += 1;
+        continue;
+      }
+
+      if (track.type !== "track") {
+        skipped += 1;
+        continue;
+      }
+
+      usable.push(track);
     }
 
     url = data.next;
   }
 
-  return tracks;
+  console.log(`${label} playlist scan`, {
+    playlistId,
+    total,
+    usable: usable.length,
+    skipped
+  });
+
+  return { usable, total, skipped };
 }
 
 function renderTemplate() {

@@ -11,7 +11,7 @@
     <header class="hero">
       <div>
         <h1>Spotify Interval Runner</h1>
-        <p>Interval workouts with Spotify playlists, manual cue points, and browser-based playback.</p>
+        <p>Interval workouts with Spotify playlists, trim sliders, interval scheduling, and browser-based playback.</p>
       </div>
       <div class="hero-actions">
         <button id="loginBtn" class="primary">Log in with Spotify</button>
@@ -41,12 +41,31 @@
       </section>
 
       <section class="card">
+        <h2>Saved Workouts</h2>
+        <div class="stack gap-sm">
+          <label>
+            <span>Name</span>
+            <input id="workoutNameInput" type="text" placeholder="Morning hills" />
+          </label>
+          <div class="row gap-sm wrap">
+            <button id="saveWorkoutBtn" class="secondary">Save workout</button>
+            <button id="loadWorkoutBtn" class="secondary">Load selected</button>
+            <button id="deleteWorkoutBtn" class="danger">Delete selected</button>
+          </div>
+          <label>
+            <span>Saved plans</span>
+            <select id="savedWorkoutSelect"></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
         <h2>Workout Template</h2>
         <div id="intervalList" class="stack gap-sm"></div>
         <div class="row gap-sm wrap top-gap">
           <button id="addIntenseBtn" class="secondary">Add Intense</button>
           <button id="addChillBtn" class="secondary">Add Chill</button>
-          <button id="saveTemplateBtn" class="secondary">Save locally</button>
+          <button id="saveTemplateBtn" class="secondary">Save template only</button>
         </div>
       </section>
 
@@ -65,7 +84,7 @@
             <input type="checkbox" id="noSlowToggle" />
             <span>No Slow</span>
           </label>
-          <div class="muted small">When No Slow is on, intense intervals use your saved cue points. Tracks without cue points can be skipped.</div>
+          <div class="muted small">Assigned songs play in the saved order. Unassigned intervals fall back to shuffled songs from the matching playlist. Trim sliders work for both intense and chill songs.</div>
         </div>
       </section>
 
@@ -74,12 +93,10 @@
         <div class="current-block">
           <div class="label">Current interval</div>
           <div id="currentMode" class="mode mode-idle">Idle</div>
-
-          <div class="row gap-sm wrap" style="align-items: flex-end;">
+          <div class="row gap-sm wrap timer-row">
             <div id="countdown" class="countdown">00:00</div>
             <div id="totalRemaining" class="small muted">Total left: 00:00</div>
           </div>
-
           <div id="trackLabel" class="track-label">No track loaded</div>
         </div>
         <div class="row gap-sm wrap top-gap">
@@ -92,9 +109,25 @@
       </section>
 
       <section class="card full-span">
-        <h2>Intense Cue Editor</h2>
-        <div class="muted small">Save the exact section to use during No Slow intervals. Start and end are in seconds.</div>
-        <div id="cueEditor" class="cue-editor top-gap"></div>
+        <h2>Interval Planner</h2>
+        <div class="muted small">Drag songs from either playlist into an interval. Use the up/down arrows inside each interval to adjust song order.</div>
+        <div id="intervalPlanner" class="interval-planner top-gap"></div>
+      </section>
+
+      <section class="card full-span">
+        <div class="row between wrap">
+          <h2>Intense Songs</h2>
+          <div class="muted small">Trim with sliders. Drag a song into an interval above or click the interval boxes on the right.</div>
+        </div>
+        <div id="intenseTrackList" class="track-list top-gap"></div>
+      </section>
+
+      <section class="card full-span">
+        <div class="row between wrap">
+          <h2>Chill Songs</h2>
+          <div class="muted small">Trim with sliders. Drag a song into an interval above or click the interval boxes on the right.</div>
+        </div>
+        <div id="chillTrackList" class="track-list top-gap"></div>
       </section>
     </main>
   </div>

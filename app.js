@@ -1,3 +1,12 @@
+const DEFAULT_TEMPLATE = [
+  { mode: "intense", minutes: 3 },
+  { mode: "chill", minutes: 1 },
+  { mode: "intense", minutes: 5 },
+  { mode: "chill", minutes: 2 }
+];
+
+const savedState = loadJSON("sir_saved_state", {});
+
 const state = {
   accessToken: null,
   refreshToken: null,
@@ -9,23 +18,28 @@ const state = {
   playlists: [],
   intenseTracks: [],
   chillTracks: [],
-  cues: loadJSON("sir_cues", {}),
-  template: loadJSON("sir_template", [
-    { mode: "intense", minutes: 3 },
-    { mode: "chill", minutes: 1 },
-    { mode: "intense", minutes: 5 },
-    { mode: "chill", minutes: 2 }
-  ]),
-  selectedIntensePlaylist: localStorage.getItem("sir_intense_playlist") || "",
-  selectedChillPlaylist: localStorage.getItem("sir_chill_playlist") || "",
-  noSlow: localStorage.getItem("sir_no_slow") === "true",
+  trackLookup: {},
+  trims: loadJSON("sir_track_trims", {}),
+  template: normalizeTemplate(savedState.template || loadJSON("sir_template", DEFAULT_TEMPLATE)),
+  intervalAssignments: [],
+  selectedIntensePlaylist: savedState.selectedIntensePlaylist || localStorage.getItem("sir_intense_playlist") || "",
+  selectedChillPlaylist: savedState.selectedChillPlaylist || localStorage.getItem("sir_chill_playlist") || "",
+  noSlow: savedState.noSlow ?? (localStorage.getItem("sir_no_slow") === "true"),
+  savedWorkouts: loadJSON("sir_saved_workouts", []),
   workout: null,
   intervalTicker: null,
   clipTimer: null,
   baseVolume: 0.92,
   trackIndices: { intense: 0, chill: 0 },
-  beepContext: null
+  shuffleBags: { intense: [], chill: [] },
+  beepContext: null,
+  dragPayload: null
 };
+
+state.intervalAssignments = normalizeAssignments(
+  savedState.intervalAssignments || loadJSON("sir_interval_assignments", []),
+  state.template.length
+);
 
 const el = {
   loginBtn: document.getElementById("loginBtn"),
@@ -35,6 +49,11 @@ const el = {
   playerStatus: document.getElementById("playerStatus"),
   deviceName: document.getElementById("deviceName"),
   statusMessage: document.getElementById("statusMessage"),
+  workoutNameInput: document.getElementById("workoutNameInput"),
+  saveWorkoutBtn: document.getElementById("saveWorkoutBtn"),
+  loadWorkoutBtn: document.getElementById("loadWorkoutBtn"),
+  deleteWorkoutBtn: document.getElementById("deleteWorkoutBtn"),
+  savedWorkoutSelect: document.getElementById("savedWorkoutSelect"),
   intervalList: document.getElementById("intervalList"),
   addIntenseBtn: document.getElementById("addIntenseBtn"),
   addChillBtn: document.getElementById("addChillBtn"),
@@ -51,14 +70,19 @@ const el = {
   countdown: document.getElementById("countdown"),
   totalRemaining: document.getElementById("totalRemaining"),
   trackLabel: document.getElementById("trackLabel"),
-  cueEditor: document.getElementById("cueEditor")
+  intervalPlanner: document.getElementById("intervalPlanner"),
+  intenseTrackList: document.getElementById("intenseTrackList"),
+  chillTrackList: document.getElementById("chillTrackList")
 };
 
 boot();
 
 function boot() {
   bindUI();
+  renderSavedWorkouts();
   renderTemplate();
+  renderPlanner();
+  renderTrackLists();
   renderCountdown(0);
   renderTotalRemaining(0);
   el.noSlowToggle.checked = state.noSlow;
@@ -73,25 +97,28 @@ function bindUI() {
   el.loginBtn.addEventListener("click", loginWithSpotify);
   el.logoutBtn.addEventListener("click", logout);
   el.activateBtn.addEventListener("click", activateAudio);
+  el.saveWorkoutBtn.addEventListener("click", saveCurrentWorkout);
+  el.loadWorkoutBtn.addEventListener("click", loadSelectedWorkout);
+  el.deleteWorkoutBtn.addEventListener("click", deleteSelectedWorkout);
   el.addIntenseBtn.addEventListener("click", () => addInterval("intense"));
   el.addChillBtn.addEventListener("click", () => addInterval("chill"));
-  el.saveTemplateBtn.addEventListener("click", saveTemplate);
+  el.saveTemplateBtn.addEventListener("click", saveTemplateOnly);
 
   el.intensePlaylist.addEventListener("change", async (e) => {
     state.selectedIntensePlaylist = e.target.value;
-    localStorage.setItem("sir_intense_playlist", state.selectedIntensePlaylist);
+    persistCoreSettings();
     await loadBucketTracks();
   });
 
   el.chillPlaylist.addEventListener("change", async (e) => {
     state.selectedChillPlaylist = e.target.value;
-    localStorage.setItem("sir_chill_playlist", state.selectedChillPlaylist);
+    persistCoreSettings();
     await loadBucketTracks();
   });
 
   el.noSlowToggle.addEventListener("change", (e) => {
     state.noSlow = e.target.checked;
-    localStorage.setItem("sir_no_slow", String(state.noSlow));
+    persistCoreSettings();
   });
 
   el.startBtn.addEventListener("click", startWorkout);
@@ -181,7 +208,6 @@ async function exchangeCodeForToken(code) {
   });
 
   if (!res.ok) throw new Error("Token exchange failed.");
-
   const data = await res.json();
   persistSession(data);
   await onAuthenticated();
@@ -201,7 +227,6 @@ async function refreshAccessToken() {
   });
 
   if (!res.ok) throw new Error("Refresh token failed.");
-
   const data = await res.json();
   persistSession({ ...data, refresh_token: data.refresh_token || state.refreshToken });
   return state.accessToken;
@@ -212,11 +237,14 @@ function persistSession(data) {
   state.refreshToken = data.refresh_token || state.refreshToken;
   state.expiresAt = Date.now() + (data.expires_in || 3600) * 1000;
 
-  localStorage.setItem("sir_session", JSON.stringify({
-    accessToken: state.accessToken,
-    refreshToken: state.refreshToken,
-    expiresAt: state.expiresAt
-  }));
+  localStorage.setItem(
+    "sir_session",
+    JSON.stringify({
+      accessToken: state.accessToken,
+      refreshToken: state.refreshToken,
+      expiresAt: state.expiresAt
+    })
+  );
 }
 
 async function onAuthenticated() {
@@ -224,13 +252,11 @@ async function onAuthenticated() {
   setStatus("Spotify connected.");
   await loadPlaylists();
   await loadBucketTracks();
-  if (state.player) {
-    await reconnectPlayer();
-  }
+  if (state.player) await reconnectPlayer();
 }
 
 function logout() {
-  stopWorkout();
+  stopWorkout(false);
   localStorage.removeItem("sir_session");
   localStorage.removeItem("sir_pkce_verifier");
 
@@ -240,9 +266,11 @@ function logout() {
   state.playlists = [];
   state.intenseTracks = [];
   state.chillTracks = [];
+  state.trackLookup = {};
 
   populatePlaylistSelects();
-  renderCueEditor();
+  renderPlanner();
+  renderTrackLists();
   updateAuthUI();
   setStatus("Signed out.");
 }
@@ -262,8 +290,7 @@ function initPlayer() {
     name: "Spotify Interval Runner",
     getOAuthToken: async (cb) => {
       try {
-        const token = await getAccessToken();
-        cb(token);
+        cb(await getAccessToken());
       } catch (err) {
         console.error(err);
       }
@@ -325,7 +352,7 @@ async function loadPlaylists() {
 
   while (url) {
     const data = await spotifyFetch(url);
-    all.push(...data.items);
+    all.push(...(data.items || []));
     url = data.next;
   }
 
@@ -356,18 +383,21 @@ async function loadBucketTracks() {
 
     state.intenseTracks = intense.usable;
     state.chillTracks = chill.usable;
+    rebuildTrackLookup();
+    resetShuffleBags();
 
-    renderCueEditor();
-
+    renderPlanner();
+    renderTrackLists();
     setStatus(
-      `Intense: ${intense.usable.length}/${intense.total} usable. ` +
-      `Chill: ${chill.usable.length}/${chill.total} usable.`
+      `Intense: ${intense.usable.length}/${intense.total} usable. Chill: ${chill.usable.length}/${chill.total} usable.`
     );
   } catch (err) {
     console.error(err);
     state.intenseTracks = [];
     state.chillTracks = [];
-    renderCueEditor();
+    state.trackLookup = {};
+    renderPlanner();
+    renderTrackLists();
     setStatus(err.message || "Could not load playlist tracks.");
   }
 }
@@ -383,41 +413,46 @@ async function loadPlaylistTracks(playlistId, label = "playlist") {
 
     for (const row of data.items || []) {
       total += 1;
-
       const playable = row.item;
       if (!playable) {
         skipped += 1;
         continue;
       }
-
       if (row.is_local || playable.is_local) {
         skipped += 1;
         continue;
       }
-
       if (playable.type !== "track") {
         skipped += 1;
         continue;
       }
-
       usable.push(playable);
     }
 
     url = data.next;
   }
 
-  console.log(`${label} playlist scan`, {
-    playlistId,
-    total,
-    usable: usable.length,
-    skipped
-  });
-
+  console.log(`${label} playlist scan`, { playlistId, total, usable: usable.length, skipped });
   return { usable, total, skipped };
+}
+
+function rebuildTrackLookup() {
+  state.trackLookup = {};
+  for (const track of [...state.intenseTracks, ...state.chillTracks]) {
+    state.trackLookup[track.id] = track;
+  }
+}
+
+function renderSavedWorkouts() {
+  const options = [`<option value="">Select a saved workout</option>`]
+    .concat(state.savedWorkouts.map((item, index) => `<option value="${index}">${escapeHtml(item.name)}</option>`))
+    .join("");
+  el.savedWorkoutSelect.innerHTML = options;
 }
 
 function renderTemplate() {
   el.intervalList.innerHTML = "";
+  syncAssignmentsLength();
 
   state.template.forEach((interval, index) => {
     const row = document.createElement("div");
@@ -440,6 +475,9 @@ function renderTemplate() {
     input.addEventListener("input", (e) => {
       const index = Number(e.target.dataset.minutesIndex);
       state.template[index].minutes = Math.max(0.25, Number(e.target.value) || 0.25);
+      renderPlanner();
+      renderTrackLists();
+      persistCoreSettings();
     });
   });
 
@@ -447,72 +485,397 @@ function renderTemplate() {
     btn.addEventListener("click", (e) => {
       const index = Number(e.target.dataset.removeIndex);
       state.template.splice(index, 1);
+      state.intervalAssignments.splice(index, 1);
       renderTemplate();
+      renderPlanner();
+      renderTrackLists();
+      persistCoreSettings();
     });
   });
+}
+
+function renderPlanner() {
+  syncAssignmentsLength();
+  el.intervalPlanner.innerHTML = "";
+
+  state.template.forEach((interval, index) => {
+    const card = document.createElement("div");
+    card.className = "interval-card";
+    card.dataset.intervalIndex = index;
+
+    const queue = getIntervalQueue(index);
+    const queueHtml = queue.length
+      ? queue
+          .map((item, queueIndex) => {
+            const track = state.trackLookup[item.trackId];
+            const label = track ? escapeHtml(track.name) : escapeHtml(item.trackId);
+            return `
+              <div class="assignment-chip" data-track-id="${item.trackId}">
+                <div class="assignment-chip-title">
+                  <strong>${label}</strong>
+                  <span class="small muted">#${queueIndex + 1}</span>
+                </div>
+                <div class="assignment-chip-controls">
+                  <button class="small-btn secondary" data-move-up="${index}:${queueIndex}">↑</button>
+                  <button class="small-btn secondary" data-move-down="${index}:${queueIndex}">↓</button>
+                  <button class="small-btn danger" data-remove-assignment="${index}:${item.trackId}">✕</button>
+                </div>
+              </div>
+            `;
+          })
+          .join("")
+      : `<div class="empty-dropzone">Drop ${interval.mode} songs here</div>`;
+
+    card.innerHTML = `
+      <div class="interval-card-header">
+        <div>
+          <div class="interval-type ${interval.mode}">${capitalize(interval.mode)}</div>
+          <div class="small muted">Interval ${index + 1} · ${interval.minutes} min</div>
+        </div>
+      </div>
+      <div class="interval-chip-list">${queueHtml}</div>
+    `;
+
+    attachIntervalDropHandlers(card, index);
+    el.intervalPlanner.appendChild(card);
+  });
+
+  el.intervalPlanner.querySelectorAll("[data-remove-assignment]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const [intervalIndex, trackId] = e.currentTarget.dataset.removeAssignment.split(":");
+      removeTrackFromInterval(Number(intervalIndex), trackId);
+    });
+  });
+
+  el.intervalPlanner.querySelectorAll("[data-move-up]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const [intervalIndex, queueIndex] = e.currentTarget.dataset.moveUp.split(":").map(Number);
+      moveAssignment(intervalIndex, queueIndex, -1);
+    });
+  });
+
+  el.intervalPlanner.querySelectorAll("[data-move-down]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const [intervalIndex, queueIndex] = e.currentTarget.dataset.moveDown.split(":").map(Number);
+      moveAssignment(intervalIndex, queueIndex, 1);
+    });
+  });
+}
+
+function attachIntervalDropHandlers(card, intervalIndex) {
+  card.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    card.classList.add("drop-over");
+  });
+  card.addEventListener("dragleave", () => {
+    card.classList.remove("drop-over");
+  });
+  card.addEventListener("drop", (e) => {
+    e.preventDefault();
+    card.classList.remove("drop-over");
+    const payload = parseDragPayload(e.dataTransfer?.getData("text/plain")) || state.dragPayload;
+    if (!payload) return;
+    addTrackToInterval(intervalIndex, payload.trackId, payload.mode);
+  });
+}
+
+function renderTrackLists() {
+  el.intenseTrackList.innerHTML = renderTrackRows(state.intenseTracks, "intense");
+  el.chillTrackList.innerHTML = renderTrackRows(state.chillTracks, "chill");
+  bindTrackRowUI("intense");
+  bindTrackRowUI("chill");
+}
+
+function renderTrackRows(tracks, mode) {
+  if (!tracks.length) {
+    return `<div class="status">Select a ${mode} playlist to view songs.</div>`;
+  }
+
+  return tracks.map((track) => {
+    const trim = getTrim(track.id, track.duration_ms);
+    const durationSec = Math.max(1, Math.round(track.duration_ms / 1000));
+    const boxes = state.template
+      .map((interval, index) => {
+        const assignedIndex = getAssignmentOrder(index, track.id);
+        const matching = interval.mode === mode;
+        const classes = ["interval-box"];
+        if (matching) classes.push("matching");
+        else classes.push("disabled");
+        if (assignedIndex >= 0) classes.push("assigned");
+        return `<button class="${classes.join(" ")}" type="button" data-toggle-interval="${track.id}:${mode}:${index}">${assignedIndex >= 0 ? assignedIndex + 1 : index + 1}</button>`;
+      })
+      .join("");
+
+    return `
+      <div class="track-row" draggable="true" data-track-id="${track.id}" data-mode="${mode}">
+        <div class="track-main">
+          <div class="track-meta">
+            <span class="drag-label">⋮⋮ drag to interval</span>
+            <strong>${escapeHtml(track.name)}</strong>
+            <span class="small muted">${escapeHtml((track.artists || []).map((a) => a.name).join(", "))}</span>
+            <span class="small muted">${formatClock(track.duration_ms)}</span>
+          </div>
+          <div class="track-actions">
+            <button class="secondary small-btn" data-preview-track="${track.id}">Preview</button>
+            <button class="secondary small-btn" data-reset-trim="${track.id}">Reset trim</button>
+          </div>
+        </div>
+        <div class="trim-panel">
+          <div class="trim-header">
+            <span>Trim start ${formatSeconds(trim.startSec)}</span>
+            <span>Trim end ${formatSeconds(trim.endSec)}</span>
+          </div>
+          <div class="trim-slider-group">
+            <div class="trim-slider-row">
+              <span class="small muted">Start</span>
+              <input type="range" min="0" max="${durationSec}" step="1" value="${Math.round(trim.startSec)}" data-trim-slider="start:${track.id}" />
+              <span class="small muted">${formatSeconds(trim.startSec)}</span>
+            </div>
+            <div class="trim-slider-row">
+              <span class="small muted">End</span>
+              <input type="range" min="1" max="${durationSec}" step="1" value="${Math.round(trim.endSec)}" data-trim-slider="end:${track.id}" />
+              <span class="small muted">${formatSeconds(trim.endSec)}</span>
+            </div>
+          </div>
+        </div>
+        <div class="interval-boxes">${boxes}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function bindTrackRowUI(mode) {
+  const listEl = mode === "intense" ? el.intenseTrackList : el.chillTrackList;
+
+  listEl.querySelectorAll(".track-row").forEach((row) => {
+    row.addEventListener("dragstart", (e) => {
+      const payload = { trackId: row.dataset.trackId, mode: row.dataset.mode };
+      state.dragPayload = payload;
+      row.classList.add("dragging");
+      e.dataTransfer.setData("text/plain", JSON.stringify(payload));
+      e.dataTransfer.effectAllowed = "copy";
+    });
+    row.addEventListener("dragend", () => {
+      row.classList.remove("dragging");
+      state.dragPayload = null;
+    });
+  });
+
+  listEl.querySelectorAll("[data-preview-track]").forEach((btn) => {
+    btn.addEventListener("click", async (e) => {
+      const trackId = e.currentTarget.dataset.previewTrack;
+      const track = state.trackLookup[trackId];
+      if (!track) return;
+      const trim = getTrim(track.id, track.duration_ms);
+      await previewTrack(track, Math.round(trim.startSec * 1000));
+    });
+  });
+
+  listEl.querySelectorAll("[data-reset-trim]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const trackId = e.currentTarget.dataset.resetTrim;
+      const track = state.trackLookup[trackId];
+      if (!track) return;
+      state.trims[trackId] = { startSec: 0, endSec: Math.round(track.duration_ms / 1000) };
+      persistCoreSettings();
+      renderTrackLists();
+    });
+  });
+
+  listEl.querySelectorAll("[data-trim-slider]").forEach((input) => {
+    input.addEventListener("input", (e) => {
+      const [kind, trackId] = e.currentTarget.dataset.trimSlider.split(":");
+      const track = state.trackLookup[trackId];
+      if (!track) return;
+      const maxSec = Math.max(1, Math.round(track.duration_ms / 1000));
+      const trim = getTrim(trackId, track.duration_ms);
+      let startSec = Math.round(trim.startSec);
+      let endSec = Math.round(trim.endSec);
+      const nextValue = Math.max(0, Math.min(maxSec, Number(e.currentTarget.value) || 0));
+
+      if (kind === "start") {
+        startSec = Math.min(nextValue, endSec - 1);
+      } else {
+        endSec = Math.max(nextValue, startSec + 1);
+      }
+
+      state.trims[trackId] = { startSec, endSec };
+      persistCoreSettings();
+      renderTrackLists();
+    });
+  });
+
+  listEl.querySelectorAll("[data-toggle-interval]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      const [trackId, rowMode, intervalIndexRaw] = e.currentTarget.dataset.toggleInterval.split(":");
+      const intervalIndex = Number(intervalIndexRaw);
+      toggleTrackInInterval(intervalIndex, trackId, rowMode);
+    });
+  });
+}
+
+function saveTemplateOnly() {
+  persistCoreSettings();
+  setStatus("Template saved locally.");
+}
+
+function saveCurrentWorkout() {
+  const name = el.workoutNameInput.value.trim();
+  if (!name) {
+    setStatus("Enter a workout name first.");
+    return;
+  }
+
+  const payload = {
+    name,
+    template: deepCopy(state.template),
+    intervalAssignments: deepCopy(state.intervalAssignments),
+    trims: deepCopy(state.trims),
+    selectedIntensePlaylist: state.selectedIntensePlaylist,
+    selectedChillPlaylist: state.selectedChillPlaylist,
+    noSlow: state.noSlow
+  };
+
+  const existingIndex = state.savedWorkouts.findIndex((item) => item.name.toLowerCase() === name.toLowerCase());
+  let selectedIndex = existingIndex;
+  if (existingIndex >= 0) state.savedWorkouts[existingIndex] = payload;
+  else {
+    state.savedWorkouts.push(payload);
+    selectedIndex = state.savedWorkouts.length - 1;
+  }
+
+  persistSavedWorkouts();
+  renderSavedWorkouts();
+  el.savedWorkoutSelect.value = String(selectedIndex);
+  setStatus("Workout saved locally.");
+}
+
+async function loadSelectedWorkout() {
+  const index = Number(el.savedWorkoutSelect.value);
+  if (Number.isNaN(index) || !state.savedWorkouts[index]) {
+    setStatus("Select a saved workout first.");
+    return;
+  }
+
+  const saved = state.savedWorkouts[index];
+  state.template = normalizeTemplate(saved.template || DEFAULT_TEMPLATE);
+  state.intervalAssignments = normalizeAssignments(saved.intervalAssignments || [], state.template.length);
+  state.trims = saved.trims || {};
+  state.selectedIntensePlaylist = saved.selectedIntensePlaylist || "";
+  state.selectedChillPlaylist = saved.selectedChillPlaylist || "";
+  state.noSlow = !!saved.noSlow;
+
+  el.workoutNameInput.value = saved.name;
+  el.noSlowToggle.checked = state.noSlow;
+  el.intensePlaylist.value = state.selectedIntensePlaylist;
+  el.chillPlaylist.value = state.selectedChillPlaylist;
+
+  renderTemplate();
+  persistCoreSettings();
+
+  if (state.accessToken) {
+    await loadBucketTracks();
+  } else {
+    renderPlanner();
+    renderTrackLists();
+  }
+
+  setStatus("Workout loaded.");
+}
+
+function deleteSelectedWorkout() {
+  const index = Number(el.savedWorkoutSelect.value);
+  if (Number.isNaN(index) || !state.savedWorkouts[index]) {
+    setStatus("Select a saved workout first.");
+    return;
+  }
+  state.savedWorkouts.splice(index, 1);
+  persistSavedWorkouts();
+  renderSavedWorkouts();
+  setStatus("Workout deleted.");
+}
+
+function persistSavedWorkouts() {
+  localStorage.setItem("sir_saved_workouts", JSON.stringify(state.savedWorkouts));
+}
+
+function persistCoreSettings() {
+  localStorage.setItem("sir_template", JSON.stringify(state.template));
+  localStorage.setItem("sir_interval_assignments", JSON.stringify(state.intervalAssignments));
+  localStorage.setItem("sir_track_trims", JSON.stringify(state.trims));
+  localStorage.setItem("sir_intense_playlist", state.selectedIntensePlaylist);
+  localStorage.setItem("sir_chill_playlist", state.selectedChillPlaylist);
+  localStorage.setItem("sir_no_slow", String(state.noSlow));
+  localStorage.setItem(
+    "sir_saved_state",
+    JSON.stringify({
+      template: state.template,
+      intervalAssignments: state.intervalAssignments,
+      selectedIntensePlaylist: state.selectedIntensePlaylist,
+      selectedChillPlaylist: state.selectedChillPlaylist,
+      noSlow: state.noSlow
+    })
+  );
 }
 
 function addInterval(mode) {
   state.template.push({ mode, minutes: 1 });
+  state.intervalAssignments.push([]);
   renderTemplate();
+  renderPlanner();
+  renderTrackLists();
+  persistCoreSettings();
 }
 
-function saveTemplate() {
-  localStorage.setItem("sir_template", JSON.stringify(state.template));
-  setStatus("Workout template saved locally.");
+function syncAssignmentsLength() {
+  state.intervalAssignments = normalizeAssignments(state.intervalAssignments, state.template.length);
 }
 
-function renderCueEditor() {
-  const tracks = state.intenseTracks;
+function getIntervalQueue(intervalIndex) {
+  const raw = state.intervalAssignments[intervalIndex] || [];
+  return raw.filter((item) => !!state.trackLookup[item.trackId] || !state.accessToken);
+}
 
-  if (!tracks.length) {
-    el.cueEditor.innerHTML = `<div class="status">Select an intense playlist to edit cue points.</div>`;
-    return;
-  }
+function addTrackToInterval(intervalIndex, trackId, trackMode) {
+  const interval = state.template[intervalIndex];
+  if (!interval || interval.mode !== trackMode) return;
+  const queue = state.intervalAssignments[intervalIndex];
+  if (queue.some((item) => item.trackId === trackId)) return;
+  queue.push({ trackId });
+  renderPlanner();
+  renderTrackLists();
+  persistCoreSettings();
+}
 
-  el.cueEditor.innerHTML = "";
+function removeTrackFromInterval(intervalIndex, trackId) {
+  state.intervalAssignments[intervalIndex] = (state.intervalAssignments[intervalIndex] || []).filter((item) => item.trackId !== trackId);
+  renderPlanner();
+  renderTrackLists();
+  persistCoreSettings();
+}
 
-  for (const track of tracks) {
-    const cue = state.cues[track.id] || {};
-    const row = document.createElement("div");
-    row.className = "cue-row";
-    row.innerHTML = `
-      <div class="cue-title">
-        <strong>${escapeHtml(track.name)}</strong>
-        <span>${escapeHtml((track.artists || []).map((a) => a.name).join(", "))}</span>
-      </div>
-      <label>
-        <span class="small muted">Start</span>
-        <input type="number" min="0" step="0.1" value="${cue.startSec ?? ""}" data-track-id="${track.id}" data-field="startSec" />
-      </label>
-      <label>
-        <span class="small muted">End</span>
-        <input type="number" min="0" step="0.1" value="${cue.endSec ?? ""}" data-track-id="${track.id}" data-field="endSec" />
-      </label>
-      <button class="secondary" data-preview-id="${track.id}">Preview</button>
-    `;
-    el.cueEditor.appendChild(row);
-  }
+function toggleTrackInInterval(intervalIndex, trackId, trackMode) {
+  const interval = state.template[intervalIndex];
+  if (!interval || interval.mode !== trackMode) return;
+  const exists = getAssignmentOrder(intervalIndex, trackId) >= 0;
+  if (exists) removeTrackFromInterval(intervalIndex, trackId);
+  else addTrackToInterval(intervalIndex, trackId, trackMode);
+}
 
-  el.cueEditor.querySelectorAll("input[data-track-id]").forEach((input) => {
-    input.addEventListener("change", (e) => {
-      const { trackId, field } = e.target.dataset;
-      const current = state.cues[trackId] || {};
-      const value = e.target.value === "" ? null : Number(e.target.value);
-      state.cues[trackId] = { ...current, [field]: value };
-      localStorage.setItem("sir_cues", JSON.stringify(state.cues));
-    });
-  });
+function moveAssignment(intervalIndex, queueIndex, delta) {
+  const queue = state.intervalAssignments[intervalIndex] || [];
+  const newIndex = queueIndex + delta;
+  if (newIndex < 0 || newIndex >= queue.length) return;
+  const [item] = queue.splice(queueIndex, 1);
+  queue.splice(newIndex, 0, item);
+  renderPlanner();
+  renderTrackLists();
+  persistCoreSettings();
+}
 
-  el.cueEditor.querySelectorAll("[data-preview-id]").forEach((btn) => {
-    btn.addEventListener("click", async (e) => {
-      const trackId = e.target.dataset.previewId;
-      const track = tracks.find((t) => t.id === trackId);
-      if (!track) return;
-      const cue = state.cues[trackId] || {};
-      await previewTrack(track, cue.startSec ? cue.startSec * 1000 : 0);
-    });
-  });
+function getAssignmentOrder(intervalIndex, trackId) {
+  const queue = state.intervalAssignments[intervalIndex] || [];
+  return queue.findIndex((item) => item.trackId === trackId);
 }
 
 async function startWorkout() {
@@ -522,28 +885,21 @@ async function startWorkout() {
     if (!state.activated) throw new Error("Tap 'Arm audio on this browser' first on iPhone.");
     if (!state.template.length) throw new Error("Add at least one interval.");
     if (!state.selectedIntensePlaylist || !state.selectedChillPlaylist) throw new Error("Choose both playlists.");
-
-    if (!state.intenseTracks.length && !state.chillTracks.length) {
-      throw new Error("Both selected playlists failed to load tracks.");
-    }
-    if (!state.intenseTracks.length) {
-      throw new Error("Intense playlist has no usable tracks loaded.");
-    }
-    if (!state.chillTracks.length) {
-      throw new Error("Chill playlist has no usable tracks loaded.");
-    }
+    if (!state.intenseTracks.length) throw new Error("Intense playlist has no usable tracks loaded.");
+    if (!state.chillTracks.length) throw new Error("Chill playlist has no usable tracks loaded.");
 
     await ensureBeepAudio();
-
     stopWorkout(false);
+    resetShuffleBags();
     state.trackIndices = { intense: 0, chill: 0 };
-
     state.workout = {
       index: 0,
       paused: false,
       intervalEndsAt: 0,
       boundaryTimer: null,
-      remainingMs: 0
+      remainingMs: 0,
+      intervalQueue: [],
+      intervalQueueCursor: 0
     };
 
     await transferPlayback(false);
@@ -564,6 +920,8 @@ async function startCurrentInterval() {
 
   state.workout.intervalEndsAt = Date.now() + durationMs;
   state.workout.remainingMs = durationMs;
+  state.workout.intervalQueue = resolveIntervalTracks(state.workout.index);
+  state.workout.intervalQueueCursor = 0;
 
   renderCurrentMode(interval.mode);
   renderCountdown(durationMs);
@@ -574,27 +932,27 @@ async function startCurrentInterval() {
     await advanceInterval();
   }, durationMs);
 
-  if (interval.mode === "intense") {
-    await playModeForDuration("intense", durationMs, state.noSlow);
-  } else {
-    await playModeForDuration("chill", durationMs, false);
-  }
+  await playModeForDuration(interval.mode, durationMs);
 }
 
-async function playModeForDuration(mode, remainingMs, useCue) {
+function resolveIntervalTracks(intervalIndex) {
+  const queue = getIntervalQueue(intervalIndex);
+  return queue
+    .map((item) => state.trackLookup[item.trackId])
+    .filter(Boolean);
+}
+
+async function playModeForDuration(mode, remainingMs) {
   if (!state.workout || state.workout.paused) return;
   if (remainingMs <= 200) return;
 
-  const track = nextTrack(mode, useCue);
+  const track = nextTrackForCurrentInterval(mode);
   if (!track) {
     setStatus(`No usable ${mode} tracks available.`);
     return;
   }
 
-  const cue = useCue ? state.cues[track.id] || {} : {};
-  const startMs = useCue && cue.startSec != null ? Math.max(0, Math.round(cue.startSec * 1000)) : 0;
-  const rawEndMs = useCue && cue.endSec != null ? Math.round(cue.endSec * 1000) : track.duration_ms;
-  const endMs = Math.min(track.duration_ms, Math.max(startMs + 500, rawEndMs));
+  const { startMs, endMs } = getTrackWindow(track, mode);
   const clipLengthMs = Math.min(remainingMs, Math.max(1000, endMs - startMs));
 
   await fadeOutThen(async () => {
@@ -609,34 +967,53 @@ async function playModeForDuration(mode, remainingMs, useCue) {
 
   state.clipTimer = setTimeout(async () => {
     if (!state.workout || state.workout.paused) return;
-
     const intervalRemaining = Math.max(0, state.workout.intervalEndsAt - Date.now());
     if (intervalRemaining <= 200) return;
-
     await fadeOut();
-    await playModeForDuration(mode, intervalRemaining, useCue);
+    await playModeForDuration(mode, intervalRemaining);
   }, nextDelay);
 }
 
-function nextTrack(mode, requireCue) {
-  const list = mode === "intense" ? state.intenseTracks : state.chillTracks;
-  if (!list.length) return null;
+function nextTrackForCurrentInterval(mode) {
+  const intervalQueue = state.workout?.intervalQueue || [];
+  if (intervalQueue.length) {
+    const index = state.workout.intervalQueueCursor % intervalQueue.length;
+    state.workout.intervalQueueCursor += 1;
+    return intervalQueue[index];
+  }
+  return nextFallbackTrack(mode);
+}
 
-  const originalIndex = state.trackIndices[mode] % list.length;
+function nextFallbackTrack(mode) {
+  const pool = getFallbackPool(mode);
+  if (!pool.length) return null;
 
-  for (let step = 0; step < list.length; step++) {
-    const idx = (originalIndex + step) % list.length;
-    const track = list[idx];
-    const cue = state.cues[track.id] || {};
-    const hasCue = cue.startSec != null;
-
-    if (!requireCue || hasCue) {
-      state.trackIndices[mode] = idx + 1;
-      return track;
-    }
+  if (!state.shuffleBags[mode].length) {
+    state.shuffleBags[mode] = shuffleArray(pool.map((track) => track.id));
   }
 
-  return null;
+  const trackId = state.shuffleBags[mode].shift();
+  return state.trackLookup[trackId] || pool[0] || null;
+}
+
+function getFallbackPool(mode) {
+  const base = mode === "intense" ? state.intenseTracks : state.chillTracks;
+  if (mode === "intense" && state.noSlow) {
+    const trimmedOnly = base.filter((track) => hasCustomTrim(track.id, track.duration_ms));
+    return trimmedOnly.length ? trimmedOnly : base;
+  }
+  return base;
+}
+
+function getTrackWindow(track, mode) {
+  const trim = getTrim(track.id, track.duration_ms);
+  const hasCustom = hasCustomTrim(track.id, track.duration_ms);
+  const shouldUseTrim = hasCustom || (mode === "intense" && state.noSlow);
+  const startMs = shouldUseTrim ? Math.max(0, Math.round(trim.startSec * 1000)) : 0;
+  const endMs = shouldUseTrim
+    ? Math.min(track.duration_ms, Math.max(startMs + 1000, Math.round(trim.endSec * 1000)))
+    : track.duration_ms;
+  return { startMs, endMs };
 }
 
 async function advanceInterval() {
@@ -644,7 +1021,6 @@ async function advanceInterval() {
 
   clearTimeout(state.clipTimer);
   await fadeOut();
-
   state.workout.index += 1;
 
   if (state.workout.index >= state.template.length) {
@@ -664,7 +1040,6 @@ async function skipToNextPeriod() {
   }
 
   const wasPaused = !!state.workout.paused;
-
   clearInterval(state.intervalTicker);
   clearTimeout(state.clipTimer);
   clearTimeout(state.workout?.boundaryTimer);
@@ -676,7 +1051,6 @@ async function skipToNextPeriod() {
   }
 
   state.workout.index += 1;
-
   if (state.workout.index >= state.template.length) {
     stopWorkout(false);
     setStatus("Workout complete.");
@@ -690,6 +1064,8 @@ async function skipToNextPeriod() {
     const durationMs = Math.round(interval.minutes * 60_000);
     state.workout.paused = true;
     state.workout.remainingMs = durationMs;
+    state.workout.intervalQueue = resolveIntervalTracks(state.workout.index);
+    state.workout.intervalQueueCursor = 0;
     renderCurrentMode(interval.mode);
     renderCountdown(durationMs);
     renderTotalRemaining(computeTotalRemainingMs());
@@ -711,7 +1087,6 @@ async function pauseWorkout() {
   clearTimeout(state.workout.boundaryTimer);
   clearTimeout(state.clipTimer);
   state.workout.remainingMs = Math.max(0, state.workout.intervalEndsAt - Date.now());
-
   renderCountdown(state.workout.remainingMs);
   renderTotalRemaining(computeTotalRemainingMs());
 
@@ -728,7 +1103,6 @@ async function resumeWorkout() {
 
   state.workout.paused = false;
   state.workout.intervalEndsAt = Date.now() + state.workout.remainingMs;
-
   state.workout.boundaryTimer = setTimeout(async () => {
     await advanceInterval();
   }, state.workout.remainingMs);
@@ -738,17 +1112,14 @@ async function resumeWorkout() {
   startIntervalTicker();
 
   const mode = state.template[state.workout.index].mode;
-  await playModeForDuration(mode, state.workout.remainingMs, mode === "intense" && state.noSlow);
+  await playModeForDuration(mode, state.workout.remainingMs);
   setStatus("Workout resumed.");
 }
 
 function stopWorkout(showMessage = true) {
   clearInterval(state.intervalTicker);
   clearTimeout(state.clipTimer);
-
-  if (state.workout?.boundaryTimer) {
-    clearTimeout(state.workout.boundaryTimer);
-  }
+  if (state.workout?.boundaryTimer) clearTimeout(state.workout.boundaryTimer);
 
   state.workout = null;
   renderCurrentMode("idle");
@@ -756,21 +1127,14 @@ function stopWorkout(showMessage = true) {
   renderTotalRemaining(0);
   el.trackLabel.textContent = "No track loaded";
 
-  if (state.player) {
-    state.player.pause().catch(() => {});
-  }
-
-  if (showMessage) {
-    setStatus("Workout stopped.");
-  }
+  if (state.player) state.player.pause().catch(() => {});
+  if (showMessage) setStatus("Workout stopped.");
 }
 
 function startIntervalTicker() {
   clearInterval(state.intervalTicker);
-
   state.intervalTicker = setInterval(() => {
     if (!state.workout || state.workout.paused) return;
-
     const remaining = Math.max(0, state.workout.intervalEndsAt - Date.now());
     state.workout.remainingMs = remaining;
     renderCountdown(remaining);
@@ -783,10 +1147,7 @@ async function playTrack(trackUri, positionMs = 0) {
     `https://api.spotify.com/v1/me/player/play?device_id=${encodeURIComponent(state.deviceId)}`,
     {
       method: "PUT",
-      body: JSON.stringify({
-        uris: [trackUri],
-        position_ms: Math.max(0, Math.round(positionMs))
-      })
+      body: JSON.stringify({ uris: [trackUri], position_ms: Math.max(0, Math.round(positionMs)) })
     },
     true
   );
@@ -804,10 +1165,8 @@ async function previewTrack(track, positionMs = 0) {
       setStatus("Arm audio on this browser before previewing.");
       return;
     }
-
     await playTrack(track.uri, positionMs);
     await fadeIn();
-
     el.trackLabel.textContent = `Preview: ${track.name} — ${(track.artists || []).map((a) => a.name).join(", ")}`;
   } catch (err) {
     console.error(err);
@@ -833,10 +1192,8 @@ async function fadeOutThen(fn) {
 
 async function fadeOut() {
   if (!state.player) return;
-
   const from = await safeVolume();
   const steps = 5;
-
   for (let i = steps - 1; i >= 0; i--) {
     const value = Math.max(0.08, from * (i / steps));
     await state.player.setVolume(value);
@@ -846,9 +1203,7 @@ async function fadeOut() {
 
 async function fadeIn() {
   if (!state.player) return;
-
   const steps = 5;
-
   for (let i = 1; i <= steps; i++) {
     const value = Math.max(0.08, state.baseVolume * (i / steps));
     await state.player.setVolume(value);
@@ -877,33 +1232,27 @@ async function spotifyFetch(url, options = {}, allowNoContent = false) {
   });
 
   if (res.status === 204 && allowNoContent) return null;
-
   if (res.status === 401 && state.refreshToken) {
     await refreshAccessToken();
     return spotifyFetch(url, options, allowNoContent);
   }
-
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Spotify API error ${res.status}: ${text}`);
   }
-
   return res.json();
 }
 
 async function getAccessToken() {
   if (!state.accessToken) throw new Error("Not logged in.");
-
   if (Date.now() > state.expiresAt - 60_000) {
     await refreshAccessToken();
   }
-
   return state.accessToken;
 }
 
 function renderCurrentMode(mode) {
   el.currentMode.className = "mode";
-
   if (mode === "intense") {
     el.currentMode.classList.add("mode-intense");
     el.currentMode.textContent = "Intense";
@@ -924,26 +1273,58 @@ function renderTotalRemaining(ms) {
   el.totalRemaining.textContent = `Total left: ${formatClock(ms)}`;
 }
 
-function formatClock(ms) {
-  const totalSec = Math.max(0, Math.ceil(ms / 1000));
-  const min = String(Math.floor(totalSec / 60)).padStart(2, "0");
-  const sec = String(totalSec % 60).padStart(2, "0");
-  return `${min}:${sec}`;
-}
-
 function computeTotalRemainingMs() {
   if (!state.workout) return 0;
-
   const currentMs = state.workout.paused
     ? Math.max(0, state.workout.remainingMs || 0)
     : Math.max(0, state.workout.intervalEndsAt - Date.now());
-
   let futureMs = 0;
   for (let i = state.workout.index + 1; i < state.template.length; i++) {
     futureMs += Math.round(state.template[i].minutes * 60_000);
   }
-
   return currentMs + futureMs;
+}
+
+function getTrim(trackId, durationMs) {
+  const durationSec = Math.max(1, Math.round(durationMs / 1000));
+  const saved = state.trims[trackId] || {};
+  const startSec = clamp(Math.round(saved.startSec ?? 0), 0, durationSec - 1);
+  const endSec = clamp(Math.round(saved.endSec ?? durationSec), startSec + 1, durationSec);
+  return { startSec, endSec };
+}
+
+function hasCustomTrim(trackId, durationMs) {
+  const trim = getTrim(trackId, durationMs);
+  const durationSec = Math.max(1, Math.round(durationMs / 1000));
+  return trim.startSec > 0 || trim.endSec < durationSec;
+}
+
+function ensureBeepAudio() {
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return Promise.resolve(null);
+  if (!state.beepContext) state.beepContext = new AudioCtx();
+  if (state.beepContext.state === "suspended") return state.beepContext.resume().then(() => state.beepContext);
+  return Promise.resolve(state.beepContext);
+}
+
+async function playPeriodBeep() {
+  const ctx = await ensureBeepAudio();
+  if (!ctx) return;
+
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  const now = ctx.currentTime;
+
+  osc.type = "sine";
+  osc.frequency.setValueAtTime(880, now);
+  gain.gain.setValueAtTime(0.0001, now);
+  gain.gain.exponentialRampToValueAtTime(0.04, now + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(now);
+  osc.stop(now + 0.13);
+  await sleep(140);
 }
 
 function setStatus(message) {
@@ -959,43 +1340,57 @@ function loadJSON(key, fallback) {
   }
 }
 
-async function ensureBeepAudio() {
-  const AudioCtx = window.AudioContext || window.webkitAudioContext;
-  if (!AudioCtx) return null;
-
-  if (!state.beepContext) {
-    state.beepContext = new AudioCtx();
-  }
-
-  if (state.beepContext.state === "suspended") {
-    await state.beepContext.resume();
-  }
-
-  return state.beepContext;
+function normalizeTemplate(template) {
+  return (template || DEFAULT_TEMPLATE).map((interval) => ({
+    mode: interval.mode === "chill" ? "chill" : "intense",
+    minutes: Math.max(0.25, Number(interval.minutes) || 1)
+  }));
 }
 
-async function playPeriodBeep() {
-  const ctx = await ensureBeepAudio();
-  if (!ctx) return;
+function normalizeAssignments(assignments, length) {
+  const source = Array.isArray(assignments) ? assignments : [];
+  const output = [];
+  for (let i = 0; i < length; i++) {
+    const current = Array.isArray(source[i]) ? source[i] : [];
+    output.push(
+      current
+        .map((item) => (typeof item === "string" ? { trackId: item } : { trackId: item.trackId }))
+        .filter((item) => !!item.trackId)
+    );
+  }
+  return output;
+}
 
-  const osc = ctx.createOscillator();
-  const gain = ctx.createGain();
-  const now = ctx.currentTime;
+function deepCopy(value) {
+  return JSON.parse(JSON.stringify(value));
+}
 
-  osc.type = "sine";
-  osc.frequency.setValueAtTime(880, now);
+function shuffleArray(list) {
+  const copy = [...list];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
 
-  gain.gain.setValueAtTime(0.0001, now);
-  gain.gain.exponentialRampToValueAtTime(0.04, now + 0.01);
-  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+function resetShuffleBags() {
+  state.shuffleBags.intense = [];
+  state.shuffleBags.chill = [];
+}
 
-  osc.connect(gain);
-  gain.connect(ctx.destination);
+function parseDragPayload(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && parsed.trackId && parsed.mode ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
-  osc.start(now);
-  osc.stop(now + 0.13);
-
-  await sleep(140);
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function sleep(ms) {
@@ -1004,6 +1399,18 @@ function sleep(ms) {
 
 function capitalize(value) {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function formatClock(ms) {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const min = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const sec = String(totalSec % 60).padStart(2, "0");
+  return `${min}:${sec}`;
+}
+
+function formatSeconds(sec) {
+  const safe = Math.max(0, Math.round(sec));
+  return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, "0")}`;
 }
 
 function escapeHtml(value) {
@@ -1024,7 +1431,6 @@ function generateRandomString(length) {
 async function sha256base64url(input) {
   const data = new TextEncoder().encode(input);
   const hash = await crypto.subtle.digest("SHA-256", data);
-
   return btoa(String.fromCharCode(...new Uint8Array(hash)))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")

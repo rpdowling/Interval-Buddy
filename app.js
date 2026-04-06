@@ -53,6 +53,9 @@ const el = {
   saveWorkoutBtn: document.getElementById("saveWorkoutBtn"),
   loadWorkoutBtn: document.getElementById("loadWorkoutBtn"),
   deleteWorkoutBtn: document.getElementById("deleteWorkoutBtn"),
+  exportWorkoutBtn: document.getElementById("exportWorkoutBtn"),
+  importWorkoutBtn: document.getElementById("importWorkoutBtn"),
+  importWorkoutInput: document.getElementById("importWorkoutInput"),
   savedWorkoutSelect: document.getElementById("savedWorkoutSelect"),
   intervalList: document.getElementById("intervalList"),
   addIntenseBtn: document.getElementById("addIntenseBtn"),
@@ -100,6 +103,9 @@ function bindUI() {
   el.saveWorkoutBtn.addEventListener("click", saveCurrentWorkout);
   el.loadWorkoutBtn.addEventListener("click", loadSelectedWorkout);
   el.deleteWorkoutBtn.addEventListener("click", deleteSelectedWorkout);
+  el.exportWorkoutBtn.addEventListener("click", exportWorkoutBundle);
+  el.importWorkoutBtn.addEventListener("click", () => el.importWorkoutInput.click());
+  el.importWorkoutInput.addEventListener("change", importWorkoutBundle);
   el.addIntenseBtn.addEventListener("click", () => addInterval("intense"));
   el.addChillBtn.addEventListener("click", () => addInterval("chill"));
   el.saveTemplateBtn.addEventListener("click", saveTemplateOnly);
@@ -750,6 +756,109 @@ function saveCurrentWorkout() {
   setStatus("Workout saved locally.");
 }
 
+function buildWorkoutBundle() {
+  return {
+    app: "spotify-interval-runner",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    currentWorkoutName: el.workoutNameInput.value.trim() || "",
+    current: {
+      template: deepCopy(state.template),
+      intervalAssignments: deepCopy(state.intervalAssignments),
+      trims: deepCopy(state.trims),
+      selectedIntensePlaylist: state.selectedIntensePlaylist,
+      selectedChillPlaylist: state.selectedChillPlaylist,
+      noSlow: state.noSlow
+    },
+    savedWorkouts: deepCopy(state.savedWorkouts)
+  };
+}
+
+function exportWorkoutBundle() {
+  try {
+    const bundle = buildWorkoutBundle();
+    const nameBase = slugify(el.workoutNameInput.value.trim() || "interval-buddy-workout");
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${nameBase}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setStatus("Workout file downloaded.");
+  } catch (err) {
+    console.error(err);
+    setStatus("Could not export workout file.");
+  }
+}
+
+async function importWorkoutBundle(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  try {
+    const raw = await file.text();
+    const parsed = JSON.parse(raw);
+    applyImportedBundle(parsed);
+    setStatus("Workout file loaded.");
+  } catch (err) {
+    console.error(err);
+    setStatus(err.message || "Could not load workout file.");
+  } finally {
+    event.target.value = "";
+  }
+}
+
+function applyImportedBundle(bundle) {
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("Invalid workout file.");
+  }
+
+  const current = bundle.current || bundle;
+  const nextTemplate = normalizeTemplate(current.template || DEFAULT_TEMPLATE);
+  const nextAssignments = normalizeAssignments(current.intervalAssignments || [], nextTemplate.length);
+  const nextTrims = current.trims && typeof current.trims === "object" ? current.trims : {};
+  const nextSaved = Array.isArray(bundle.savedWorkouts)
+    ? bundle.savedWorkouts.map((item) => ({
+        name: String(item.name || "Imported Workout"),
+        template: normalizeTemplate(item.template || DEFAULT_TEMPLATE),
+        intervalAssignments: normalizeAssignments(item.intervalAssignments || [], normalizeTemplate(item.template || DEFAULT_TEMPLATE).length),
+        trims: item.trims && typeof item.trims === "object" ? item.trims : {},
+        selectedIntensePlaylist: item.selectedIntensePlaylist || "",
+        selectedChillPlaylist: item.selectedChillPlaylist || "",
+        noSlow: !!item.noSlow
+      }))
+    : state.savedWorkouts;
+
+  state.template = nextTemplate;
+  state.intervalAssignments = nextAssignments;
+  state.trims = nextTrims;
+  state.selectedIntensePlaylist = current.selectedIntensePlaylist || "";
+  state.selectedChillPlaylist = current.selectedChillPlaylist || "";
+  state.noSlow = !!current.noSlow;
+  state.savedWorkouts = nextSaved;
+
+  el.workoutNameInput.value = bundle.currentWorkoutName || current.name || "";
+  el.noSlowToggle.checked = state.noSlow;
+
+  renderSavedWorkouts();
+  renderTemplate();
+  persistSavedWorkouts();
+  persistCoreSettings();
+
+  if (state.accessToken) {
+    populatePlaylistSelects();
+    el.intensePlaylist.value = state.selectedIntensePlaylist;
+    el.chillPlaylist.value = state.selectedChillPlaylist;
+    loadBucketTracks().catch(console.error);
+  } else {
+    renderPlanner();
+    renderTrackLists();
+  }
+}
+
 async function loadSelectedWorkout() {
   const index = Number(el.savedWorkoutSelect.value);
   if (Number.isNaN(index) || !state.savedWorkouts[index]) {
@@ -1363,6 +1472,13 @@ function normalizeAssignments(assignments, length) {
 
 function deepCopy(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function slugify(value) {
+  return String(value || "workout")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workout";
 }
 
 function shuffleArray(list) {

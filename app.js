@@ -16,16 +16,24 @@ const state = {
   playerReady: false,
   activated: false,
   playlists: [],
-  intenseTracks: [],
-  chillTracks: [],
+  intenseTracks: deserializeTracks(savedState.importedCatalogs?.intense || []),
+  chillTracks: deserializeTracks(savedState.importedCatalogs?.chill || []),
   trackLookup: {},
   trims: loadJSON("sir_track_trims", {}),
   template: normalizeTemplate(savedState.template || loadJSON("sir_template", DEFAULT_TEMPLATE)),
   intervalAssignments: [],
   selectedIntensePlaylist: savedState.selectedIntensePlaylist || localStorage.getItem("sir_intense_playlist") || "",
   selectedChillPlaylist: savedState.selectedChillPlaylist || localStorage.getItem("sir_chill_playlist") || "",
+  importedCatalogs: {
+    intense: deepCopy(savedState.importedCatalogs?.intense || []),
+    chill: deepCopy(savedState.importedCatalogs?.chill || [])
+  },
+  importedPlaylistMeta: {
+    intense: savedState.importedPlaylistMeta?.intense || null,
+    chill: savedState.importedPlaylistMeta?.chill || null
+  },
   noSlow: savedState.noSlow ?? (localStorage.getItem("sir_no_slow") === "true"),
-  savedWorkouts: loadJSON("sir_saved_workouts", []),
+  savedWorkouts: normalizeSavedWorkouts(loadJSON("sir_saved_workouts", [])),
   workout: null,
   intervalTicker: null,
   clipTimer: null,
@@ -82,6 +90,8 @@ boot();
 
 function boot() {
   bindUI();
+  rebuildTrackLookup();
+  resetShuffleBags();
   renderSavedWorkouts();
   renderTemplate();
   renderPlanner();
@@ -103,21 +113,23 @@ function bindUI() {
   el.saveWorkoutBtn.addEventListener("click", saveCurrentWorkout);
   el.loadWorkoutBtn.addEventListener("click", loadSelectedWorkout);
   el.deleteWorkoutBtn.addEventListener("click", deleteSelectedWorkout);
-  el.exportWorkoutBtn.addEventListener("click", exportWorkoutBundle);
-  el.importWorkoutBtn.addEventListener("click", () => el.importWorkoutInput.click());
-  el.importWorkoutInput.addEventListener("change", importWorkoutBundle);
+  el.exportWorkoutBtn?.addEventListener("click", exportWorkoutBundle);
+  el.importWorkoutBtn?.addEventListener("click", () => el.importWorkoutInput?.click());
+  el.importWorkoutInput?.addEventListener("change", importWorkoutBundle);
   el.addIntenseBtn.addEventListener("click", () => addInterval("intense"));
   el.addChillBtn.addEventListener("click", () => addInterval("chill"));
   el.saveTemplateBtn.addEventListener("click", saveTemplateOnly);
 
   el.intensePlaylist.addEventListener("change", async (e) => {
     state.selectedIntensePlaylist = e.target.value;
+    clearImportedBucket("intense");
     persistCoreSettings();
     await loadBucketTracks();
   });
 
   el.chillPlaylist.addEventListener("change", async (e) => {
     state.selectedChillPlaylist = e.target.value;
+    clearImportedBucket("chill");
     persistCoreSettings();
     await loadBucketTracks();
   });
@@ -367,44 +379,113 @@ async function loadPlaylists() {
 }
 
 function populatePlaylistSelects() {
-  const options = [`<option value="">Select a playlist</option>`]
+  const intenseExtra = buildImportedPlaylistOption("intense");
+  const chillExtra = buildImportedPlaylistOption("chill");
+
+  const intenseOptions = [`<option value="">Select a playlist</option>`]
+    .concat(intenseExtra ? [intenseExtra] : [])
     .concat(state.playlists.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`))
     .join("");
 
-  el.intensePlaylist.innerHTML = options;
-  el.chillPlaylist.innerHTML = options;
+  const chillOptions = [`<option value="">Select a playlist</option>`]
+    .concat(chillExtra ? [chillExtra] : [])
+    .concat(state.playlists.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`))
+    .join("");
+
+  el.intensePlaylist.innerHTML = intenseOptions;
+  el.chillPlaylist.innerHTML = chillOptions;
   el.intensePlaylist.value = state.selectedIntensePlaylist;
   el.chillPlaylist.value = state.selectedChillPlaylist;
 }
 
+function buildImportedPlaylistOption(mode) {
+  const selectedId = mode === "intense" ? state.selectedIntensePlaylist : state.selectedChillPlaylist;
+  if (!selectedId) return "";
+  const exists = state.playlists.some((p) => p.id === selectedId);
+  if (exists) return "";
+  const meta = state.importedPlaylistMeta[mode];
+  const label = meta?.name || `${capitalize(mode)} playlist from imported file`;
+  return `<option value="${escapeHtml(selectedId)}">${escapeHtml(label)} (from file)</option>`;
+}
+
 async function loadBucketTracks() {
+  const messages = [];
+
+  const intense = await resolveBucketTracks("intense", state.selectedIntensePlaylist);
+  const chill = await resolveBucketTracks("chill", state.selectedChillPlaylist);
+
+  state.intenseTracks = intense.tracks;
+  state.chillTracks = chill.tracks;
+  rebuildTrackLookup();
+  resetShuffleBags();
+
+  renderPlanner();
+  renderTrackLists();
+
+  if (intense.message) messages.push(intense.message);
+  if (chill.message) messages.push(chill.message);
+
+  if (!state.intenseTracks.length && !state.chillTracks.length && (intense.error || chill.error)) {
+    const errors = [intense.error, chill.error].filter(Boolean).join(" | ");
+    setStatus(errors || "Could not load playlist tracks.");
+    return;
+  }
+
+  setStatus(messages.join(" ") || `Intense: ${state.intenseTracks.length} ready. Chill: ${state.chillTracks.length} ready.`);
+}
+
+async function resolveBucketTracks(mode, playlistId) {
+  const embedded = deserializeTracks(state.importedCatalogs[mode] || []);
+  const embeddedLabel = embedded.length ? `${embedded.length} file tracks ready` : "0 tracks";
+
+  if (!playlistId) {
+    return {
+      tracks: embedded,
+      source: embedded.length ? "file" : "none",
+      message: embedded.length ? `${capitalize(mode)}: using ${embeddedLabel}.` : `${capitalize(mode)}: no playlist selected.`
+    };
+  }
+
   try {
-    const intense = state.selectedIntensePlaylist
-      ? await loadPlaylistTracks(state.selectedIntensePlaylist, "intense")
-      : { usable: [], total: 0, skipped: 0 };
+    const result = await loadPlaylistTracks(playlistId, mode);
+    if (result.usable.length) {
+      return {
+        tracks: result.usable,
+        source: "playlist",
+        message: `${capitalize(mode)}: ${result.usable.length}/${result.total} playlist tracks loaded.`
+      };
+    }
 
-    const chill = state.selectedChillPlaylist
-      ? await loadPlaylistTracks(state.selectedChillPlaylist, "chill")
-      : { usable: [], total: 0, skipped: 0 };
+    if (embedded.length) {
+      return {
+        tracks: embedded,
+        source: "file",
+        message: `${capitalize(mode)}: playlist had no usable tracks, using ${embeddedLabel}.`
+      };
+    }
 
-    state.intenseTracks = intense.usable;
-    state.chillTracks = chill.usable;
-    rebuildTrackLookup();
-    resetShuffleBags();
-
-    renderPlanner();
-    renderTrackLists();
-    setStatus(
-      `Intense: ${intense.usable.length}/${intense.total} usable. Chill: ${chill.usable.length}/${chill.total} usable.`
-    );
+    return {
+      tracks: [],
+      source: "playlist",
+      message: `${capitalize(mode)}: 0/${result.total} usable tracks.`
+    };
   } catch (err) {
     console.error(err);
-    state.intenseTracks = [];
-    state.chillTracks = [];
-    state.trackLookup = {};
-    renderPlanner();
-    renderTrackLists();
-    setStatus(err.message || "Could not load playlist tracks.");
+    if (embedded.length) {
+      return {
+        tracks: embedded,
+        source: "file",
+        error: err.message,
+        message: `${capitalize(mode)}: playlist access failed, using ${embeddedLabel}.`
+      };
+    }
+
+    return {
+      tracks: [],
+      source: "error",
+      error: err.message,
+      message: `${capitalize(mode)}: playlist access failed.`
+    };
   }
 }
 
@@ -739,6 +820,8 @@ function saveCurrentWorkout() {
     trims: deepCopy(state.trims),
     selectedIntensePlaylist: state.selectedIntensePlaylist,
     selectedChillPlaylist: state.selectedChillPlaylist,
+    importedCatalogs: buildCurrentCatalogs(),
+    importedPlaylistMeta: buildCurrentPlaylistMeta(),
     noSlow: state.noSlow
   };
 
@@ -756,18 +839,45 @@ function saveCurrentWorkout() {
   setStatus("Workout saved locally.");
 }
 
+function buildCurrentCatalogs() {
+  return {
+    intense: serializeTracks(state.intenseTracks),
+    chill: serializeTracks(state.chillTracks)
+  };
+}
+
+function buildCurrentPlaylistMeta() {
+  return {
+    intense: buildPlaylistMeta("intense"),
+    chill: buildPlaylistMeta("chill")
+  };
+}
+
+function buildPlaylistMeta(mode) {
+  const playlistId = mode === "intense" ? state.selectedIntensePlaylist : state.selectedChillPlaylist;
+  if (!playlistId) return null;
+  const known = state.playlists.find((p) => p.id === playlistId);
+  const fallback = state.importedPlaylistMeta[mode];
+  return {
+    id: playlistId,
+    name: known?.name || fallback?.name || `${capitalize(mode)} playlist`
+  };
+}
+
 function buildWorkoutBundle() {
   return {
     app: "spotify-interval-runner",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
-    currentWorkoutName: el.workoutNameInput.value.trim() || "",
+    currentWorkoutName: el.workoutNameInput?.value?.trim() || "",
     current: {
       template: deepCopy(state.template),
       intervalAssignments: deepCopy(state.intervalAssignments),
       trims: deepCopy(state.trims),
       selectedIntensePlaylist: state.selectedIntensePlaylist,
       selectedChillPlaylist: state.selectedChillPlaylist,
+      importedCatalogs: buildCurrentCatalogs(),
+      importedPlaylistMeta: buildCurrentPlaylistMeta(),
       noSlow: state.noSlow
     },
     savedWorkouts: deepCopy(state.savedWorkouts)
@@ -777,7 +887,7 @@ function buildWorkoutBundle() {
 function exportWorkoutBundle() {
   try {
     const bundle = buildWorkoutBundle();
-    const nameBase = slugify(el.workoutNameInput.value.trim() || "interval-buddy-workout");
+    const nameBase = slugify(el.workoutNameInput?.value?.trim() || "interval-buddy-workout");
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -820,42 +930,47 @@ function applyImportedBundle(bundle) {
   const nextTemplate = normalizeTemplate(current.template || DEFAULT_TEMPLATE);
   const nextAssignments = normalizeAssignments(current.intervalAssignments || [], nextTemplate.length);
   const nextTrims = current.trims && typeof current.trims === "object" ? current.trims : {};
-  const nextSaved = Array.isArray(bundle.savedWorkouts)
-    ? bundle.savedWorkouts.map((item) => ({
-        name: String(item.name || "Imported Workout"),
-        template: normalizeTemplate(item.template || DEFAULT_TEMPLATE),
-        intervalAssignments: normalizeAssignments(item.intervalAssignments || [], normalizeTemplate(item.template || DEFAULT_TEMPLATE).length),
-        trims: item.trims && typeof item.trims === "object" ? item.trims : {},
-        selectedIntensePlaylist: item.selectedIntensePlaylist || "",
-        selectedChillPlaylist: item.selectedChillPlaylist || "",
-        noSlow: !!item.noSlow
-      }))
-    : state.savedWorkouts;
+  const nextCatalogs = normalizeCatalogs(current.importedCatalogs || {
+    intense: current.intenseTracks || [],
+    chill: current.chillTracks || []
+  });
+  const nextMeta = normalizePlaylistMeta(current.importedPlaylistMeta || {
+    intense: current.selectedIntensePlaylist ? { id: current.selectedIntensePlaylist, name: current.selectedIntensePlaylistName || "Imported intense playlist" } : null,
+    chill: current.selectedChillPlaylist ? { id: current.selectedChillPlaylist, name: current.selectedChillPlaylistName || "Imported chill playlist" } : null
+  });
+  const nextSaved = normalizeSavedWorkouts(bundle.savedWorkouts || state.savedWorkouts);
 
   state.template = nextTemplate;
   state.intervalAssignments = nextAssignments;
   state.trims = nextTrims;
   state.selectedIntensePlaylist = current.selectedIntensePlaylist || "";
   state.selectedChillPlaylist = current.selectedChillPlaylist || "";
-  state.noSlow = !!current.noSlow;
+  state.importedCatalogs = nextCatalogs;
+  state.importedPlaylistMeta = nextMeta;
+  state.intenseTracks = deserializeTracks(nextCatalogs.intense);
+  state.chillTracks = deserializeTracks(nextCatalogs.chill);
   state.savedWorkouts = nextSaved;
+  state.noSlow = !!current.noSlow;
 
-  el.workoutNameInput.value = bundle.currentWorkoutName || current.name || "";
+  if (el.workoutNameInput) {
+    el.workoutNameInput.value = bundle.currentWorkoutName || current.name || "";
+  }
   el.noSlowToggle.checked = state.noSlow;
 
+  rebuildTrackLookup();
+  resetShuffleBags();
   renderSavedWorkouts();
   renderTemplate();
+  renderPlanner();
+  renderTrackLists();
   persistSavedWorkouts();
   persistCoreSettings();
 
   if (state.accessToken) {
     populatePlaylistSelects();
-    el.intensePlaylist.value = state.selectedIntensePlaylist;
-    el.chillPlaylist.value = state.selectedChillPlaylist;
+    if (el.intensePlaylist) el.intensePlaylist.value = state.selectedIntensePlaylist;
+    if (el.chillPlaylist) el.chillPlaylist.value = state.selectedChillPlaylist;
     loadBucketTracks().catch(console.error);
-  } else {
-    renderPlanner();
-    renderTrackLists();
   }
 }
 
@@ -866,23 +981,29 @@ async function loadSelectedWorkout() {
     return;
   }
 
-  const saved = state.savedWorkouts[index];
+  const saved = normalizeWorkoutRecord(state.savedWorkouts[index]);
   state.template = normalizeTemplate(saved.template || DEFAULT_TEMPLATE);
   state.intervalAssignments = normalizeAssignments(saved.intervalAssignments || [], state.template.length);
   state.trims = saved.trims || {};
   state.selectedIntensePlaylist = saved.selectedIntensePlaylist || "";
   state.selectedChillPlaylist = saved.selectedChillPlaylist || "";
+  state.importedCatalogs = normalizeCatalogs(saved.importedCatalogs || {});
+  state.importedPlaylistMeta = normalizePlaylistMeta(saved.importedPlaylistMeta || {});
+  state.intenseTracks = deserializeTracks(state.importedCatalogs.intense);
+  state.chillTracks = deserializeTracks(state.importedCatalogs.chill);
   state.noSlow = !!saved.noSlow;
 
   el.workoutNameInput.value = saved.name;
   el.noSlowToggle.checked = state.noSlow;
-  el.intensePlaylist.value = state.selectedIntensePlaylist;
-  el.chillPlaylist.value = state.selectedChillPlaylist;
-
+  rebuildTrackLookup();
+  resetShuffleBags();
   renderTemplate();
   persistCoreSettings();
 
   if (state.accessToken) {
+    populatePlaylistSelects();
+    el.intensePlaylist.value = state.selectedIntensePlaylist;
+    el.chillPlaylist.value = state.selectedChillPlaylist;
     await loadBucketTracks();
   } else {
     renderPlanner();
@@ -922,6 +1043,8 @@ function persistCoreSettings() {
       intervalAssignments: state.intervalAssignments,
       selectedIntensePlaylist: state.selectedIntensePlaylist,
       selectedChillPlaylist: state.selectedChillPlaylist,
+      importedCatalogs: buildCurrentCatalogs(),
+      importedPlaylistMeta: buildCurrentPlaylistMeta(),
       noSlow: state.noSlow
     })
   );
@@ -993,9 +1116,8 @@ async function startWorkout() {
     if (!state.playerReady || !state.deviceId) throw new Error("Browser player is not ready.");
     if (!state.activated) throw new Error("Tap 'Arm audio on this browser' first on iPhone.");
     if (!state.template.length) throw new Error("Add at least one interval.");
-    if (!state.selectedIntensePlaylist || !state.selectedChillPlaylist) throw new Error("Choose both playlists.");
-    if (!state.intenseTracks.length) throw new Error("Intense playlist has no usable tracks loaded.");
-    if (!state.chillTracks.length) throw new Error("Chill playlist has no usable tracks loaded.");
+    if (!state.intenseTracks.length) throw new Error("No intense tracks are available. Select a playlist or load a workout file.");
+    if (!state.chillTracks.length) throw new Error("No chill tracks are available. Select a playlist or load a workout file.");
 
     await ensureBeepAudio();
     stopWorkout(false);
@@ -1449,6 +1571,85 @@ function loadJSON(key, fallback) {
   }
 }
 
+function serializeTracks(tracks) {
+  return (tracks || []).map(serializeTrack);
+}
+
+function serializeTrack(track) {
+  if (!track || !track.id || !track.uri) return null;
+  return {
+    id: track.id,
+    uri: track.uri,
+    name: track.name || "Unknown track",
+    artists: Array.isArray(track.artists) ? track.artists.map((artist) => ({ name: artist?.name || "Unknown artist" })) : [],
+    duration_ms: Number(track.duration_ms) || 30000,
+    type: "track",
+    is_local: false
+  };
+}
+
+function deserializeTracks(tracks) {
+  return (tracks || []).map(normalizeTrackLite).filter(Boolean);
+}
+
+function normalizeTrackLite(track) {
+  if (!track || !track.id || !track.uri) return null;
+  return {
+    id: track.id,
+    uri: track.uri,
+    name: track.name || "Unknown track",
+    artists: Array.isArray(track.artists) ? track.artists.map((artist) => ({ name: artist?.name || "Unknown artist" })) : [],
+    duration_ms: Number(track.duration_ms) || 30000,
+    type: "track",
+    is_local: false
+  };
+}
+
+function normalizeCatalogs(catalogs) {
+  return {
+    intense: serializeTracks(deserializeTracks(catalogs?.intense || [])),
+    chill: serializeTracks(deserializeTracks(catalogs?.chill || []))
+  };
+}
+
+function normalizePlaylistMeta(meta) {
+  return {
+    intense: meta?.intense?.id ? { id: String(meta.intense.id), name: String(meta.intense.name || "Imported intense playlist") } : null,
+    chill: meta?.chill?.id ? { id: String(meta.chill.id), name: String(meta.chill.name || "Imported chill playlist") } : null
+  };
+}
+
+function normalizeWorkoutRecord(record) {
+  return {
+    name: String(record?.name || "Imported Workout"),
+    template: normalizeTemplate(record?.template || DEFAULT_TEMPLATE),
+    intervalAssignments: normalizeAssignments(record?.intervalAssignments || [], normalizeTemplate(record?.template || DEFAULT_TEMPLATE).length),
+    trims: record?.trims && typeof record.trims === "object" ? record.trims : {},
+    selectedIntensePlaylist: record?.selectedIntensePlaylist || "",
+    selectedChillPlaylist: record?.selectedChillPlaylist || "",
+    importedCatalogs: normalizeCatalogs(record?.importedCatalogs || {
+      intense: record?.intenseTracks || [],
+      chill: record?.chillTracks || []
+    }),
+    importedPlaylistMeta: normalizePlaylistMeta(record?.importedPlaylistMeta || {
+      intense: record?.selectedIntensePlaylist ? { id: record.selectedIntensePlaylist, name: record.selectedIntensePlaylistName || "Imported intense playlist" } : null,
+      chill: record?.selectedChillPlaylist ? { id: record.selectedChillPlaylist, name: record.selectedChillPlaylistName || "Imported chill playlist" } : null
+    }),
+    noSlow: !!record?.noSlow
+  };
+}
+
+function normalizeSavedWorkouts(list) {
+  return (Array.isArray(list) ? list : []).map(normalizeWorkoutRecord);
+}
+
+function clearImportedBucket(mode) {
+  state.importedCatalogs[mode] = [];
+  state.importedPlaylistMeta[mode] = null;
+  rebuildTrackLookup();
+  resetShuffleBags();
+}
+
 function normalizeTemplate(template) {
   return (template || DEFAULT_TEMPLATE).map((interval) => ({
     mode: interval.mode === "chill" ? "chill" : "intense",
@@ -1474,13 +1675,6 @@ function deepCopy(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function slugify(value) {
-  return String(value || "workout")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "workout";
-}
-
 function shuffleArray(list) {
   const copy = [...list];
   for (let i = copy.length - 1; i > 0; i--) {
@@ -1493,6 +1687,13 @@ function shuffleArray(list) {
 function resetShuffleBags() {
   state.shuffleBags.intense = [];
   state.shuffleBags.chill = [];
+}
+
+function slugify(value) {
+  return String(value || "workout")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workout";
 }
 
 function parseDragPayload(value) {
